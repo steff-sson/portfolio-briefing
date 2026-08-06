@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfolio-briefing"
+version = "0.1.0"
+description = "Automation-Komponente für wöchentliche/monatliche Portfolio-Briefings"
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Stefan Weitzel", email = "steff-sson@users.noreply.github.com"}
+]
+dependencies = [
+    "automation-core>=1.0,<2.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "feedparser>=6.0.0",
+    "yfinance>=0.2.0",
+    "openai>=1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0"
+]
+
+[project.scripts]
+run-briefing = "scripts.run_briefing:main"
+
+[tool.setuptools]
+packages = ["scripts"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

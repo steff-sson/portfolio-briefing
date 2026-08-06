@@ -1,0 +1,10 @@
+.venv/
+logs/
+__pycache__/
+*.pyc
+.env
+config/portfolio.json
+config/transactions.json
+*.egg-info/
+.pytest_cache/
+.mypy_cache/

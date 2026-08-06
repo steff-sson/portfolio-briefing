@@ -1,0 +1,6 @@
+[
+  {"date": "2026-01-15", "isin": "US0378331005", "type": "buy", "quantity": 5, "price_eur": 195.00},
+  {"date": "2026-03-20", "isin": "NL0010273215", "type": "buy", "quantity": 2, "price_eur": 680.00},
+  {"date": "2026-06-10", "isin": "DE0007164600", "type": "buy", "quantity": 4, "price_eur": 118.00},
+  {"date": "2026-07-05", "isin": "DK0062498333", "type": "buy", "quantity": 10, "price_eur": 72.50}
+]

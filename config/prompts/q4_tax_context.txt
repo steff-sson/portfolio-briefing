@@ -1,0 +1,5 @@
+STEUER-CHECK Q4 (nur Oktober-Dezember):
+1. VERLUSTVERRECHNUNG: Positionen mit unrealisiertem Verlust?
+2. SPEKULATIONSFRIST: Positionen <12 Monate mit Gewinn?
+3. VORABPAUSCHALE: Thesaurierende ETFs im Januar?
+Format: Fakten, keine Steuerberatung. Fußnote: "Fragen Sie Ihren Steuerberater."

@@ -1,0 +1,12 @@
+{
+  "IE00BK5BQT80": {"name": "Vanguard FTSE All-World UCITS ETF", "ter": 0.22, "region": "Global", "sector": "Diversified"},
+  "IE00B4L5Y983": {"name": "iShares Core MSCI World UCITS ETF", "ter": 0.20, "region": "Global", "sector": "Diversified"},
+  "IE00B8GKDB10": {"name": "Vanguard S&P 500 UCITS ETF", "ter": 0.07, "region": "US", "sector": "Diversified"},
+  "IE00B1FZS350": {"name": "iShares Core MSCI EM IMI UCITS ETF", "ter": 0.18, "region": "Emerging", "sector": "Diversified"},
+  "LU0908508814": {"name": "Amundi MSCI Europe UCITS ETF", "ter": 0.25, "region": "Europe", "sector": "Diversified"},
+  "IE00B4WXJJ64": {"name": "iShares Core DAX UCITS ETF", "ter": 0.16, "region": "Germany", "sector": "Diversified"},
+  "IE00B3XXRP09": {"name": "Vanguard FTSE All-World High Dividend", "ter": 0.29, "region": "Global", "sector": "Dividend"},
+  "IE00BKM4GZ66": {"name": "iShares Core MSCI Europe UCITS ETF", "ter": 0.12, "region": "Europe", "sector": "Diversified"},
+  "IE00B1XNHC34": {"name": "iShares MSCI World Small Cap UCITS ETF", "ter": 0.35, "region": "Global", "sector": "Small Cap"},
+  "IE00BWFY5674": {"name": "Lyxor Core MSCI World UCITS ETF", "ter": 0.12, "region": "Global", "sector": "Diversified"}
+}

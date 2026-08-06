@@ -1,0 +1,9 @@
+{
+  "feeds": [
+    {"name": "reuters", "category": "general", "url": "https://feeds.reuters.com/reuters/businessNews"},
+    {"name": "cnbc", "category": "general", "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"},
+    {"name": "handelsblatt", "category": "general", "url": "https://www.handelsblatt.com/contentexport/feed/wirtschaft"},
+    {"name": "marketwatch", "category": "general", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
+    {"name": "yahoo_finance", "category": "general", "url": "https://finance.yahoo.com/news/rssindex"}
+  ]
+}

@@ -1,0 +1,21 @@
+strategy:
+  name: "Core-Satellite"
+  core_ratio_target: 0.35
+  core_ratio_min: 0.30
+  core_ratio_max: 0.45
+  satellite_ratio_target: 0.65
+  single_position_max: 0.25
+  sector_concentration_max: 0.35
+  drift_threshold: 0.05
+  turnover_threshold: 0.10
+  thesis_deadline_months: 6
+  categories:
+    core: ["World ETF", "All-World ETF", "MSCI World"]
+    satellite: ["Einzelaktie", "Sektor-ETF", "Thematische ETF"]
+  sectors:
+    "Apple Inc.": "Technology"
+    "ASML Holding": "Technology"
+    "SAP SE": "Technology"
+    "Novo Nordisk": "Health Care"
+    "Vanguard FTSE All-World": "Diversified"
+    "iShares Core MSCI World": "Diversified"

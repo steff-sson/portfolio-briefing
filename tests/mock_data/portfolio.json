@@ -1,0 +1,12 @@
+{
+  "holdings": [
+    {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "quantity": 15, "value_eur": 1850.00, "category": "core"},
+    {"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World", "quantity": 10, "value_eur": 920.00, "category": "core"},
+    {"isin": "US0378331005", "name": "Apple Inc.", "quantity": 12, "value_eur": 2400.00, "category": "satellite", "ticker": "AAPL"},
+    {"isin": "NL0010273215", "name": "ASML Holding", "quantity": 3, "value_eur": 2100.00, "category": "satellite", "ticker": "ASML"},
+    {"isin": "DE0007164600", "name": "SAP SE", "quantity": 8, "value_eur": 960.00, "category": "satellite", "ticker": "SAP"},
+    {"isin": "DK0062498333", "name": "Novo Nordisk", "quantity": 20, "value_eur": 1450.00, "category": "satellite", "ticker": "NOVO-B"}
+  ],
+  "total_value_eur": 9680.00,
+  "cash_eur": 320.00
+}
