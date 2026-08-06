@@ -25,6 +25,12 @@ Für echte Portfolio-Daten muss `sc login` ausgeführt sein. Ist `sc` nicht inst
 */30 * * * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/healthcheck.py
 ```
 
+## Testlauf (Mock-Daten, ohne API-Calls)
+
+```bash
+.venv/bin/python scripts/run_briefing.py monday --dry-run
+```
+
 ## Config-Env-Variablen
 
 In `~/.config/automation/config.env`:

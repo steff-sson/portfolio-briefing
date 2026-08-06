@@ -39,5 +39,9 @@ TELEGRAM_CHAT_ID=...
 ## Run
 
 ```bash
+# Produktion
 .venv/bin/python scripts/run_briefing.py monday
+
+# Testlauf mit Mock-Daten (keine API-Calls)
+.venv/bin/python scripts/run_briefing.py monday --dry-run
 ```
