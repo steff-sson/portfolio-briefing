@@ -5,8 +5,7 @@ __pycache__/
 .env
 config/portfolio.json
 config/transactions.json
-config/prompts/setup_generate.txt
-config/prompts/setup_system.txt
+config/strategy.yaml
 *.egg-info/
 .pytest_cache/
 .mypy_cache/

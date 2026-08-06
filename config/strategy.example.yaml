@@ -1,0 +1,55 @@
+meta:
+  version: 1
+  created: "2026-08-06"
+  last_reviewed: "2026-08-06"
+  next_review: "2026-11-06"
+  cooling_off_days: 30
+
+investor:
+  horizon: ">15y"
+  income_source: "monthly_savings"
+  purpose: "retirement"
+  risk_profile: "moderate"
+
+portfolio:
+  core_pct: 75.0
+  satellite_pct: 25.0
+  core_description: "FTSE All-World (Acc)"
+  rebalancing:
+    method: "threshold"
+    threshold_pct: 5.0
+
+satellite_limits:
+  max_position_pct: 5.0
+  max_sector_pct: 15.0
+  max_positions: 10
+  max_turnover_annual_pct: 30.0
+  max_trades_per_quarter: 3
+
+sectors:
+  preferred: ["technology", "healthcare"]
+  excluded: ["tobacco", "fossil_fuels"]
+  notes: ""
+
+regions:
+  core: "global"
+  satellite_restriction: "none"
+
+thesis:
+  required: true
+  template: "thesis_template.md"
+
+alerts:
+  on_position_over_5pct: true
+  on_sector_over_15pct: true
+  on_positions_exceed_max: true
+  on_turnover_exceeded: true
+  on_thesis_expiring_soon_days: 30
+  on_core_drift_over_threshold: true
+  warn_on_position_over_4pct: true
+  warn_on_correlation_to_core: 0.8
+
+review_schedule:
+  quarterly_strategy_review: true
+  annual_full_review: true
+  triggers: ["life_event", "market_crash_20pct", "income_change_30pct"]
