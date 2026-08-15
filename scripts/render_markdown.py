@@ -11,12 +11,24 @@ TAGS = {
     "monthly": ["portfolio", "briefing", "monthly"],
 }
 
+# Lesbare Header-Bezeichnung statt technischem mode-Token.
+MODE_LABELS = {
+    "monday": "Montag",
+    "friday": "Freitag",
+    "monthly": "Monatsrückblick",
+}
 
-def render(briefing_text: str, mode: str, date: str | None = None) -> str:
+
+def render(briefing_text: str, mode: str, date: str | None = None, status: str = "active") -> str:
+    """Render markdown with frontmatter.
+
+    Status kommt explizit vom Aufrufer (Orchestrator) — kein
+    Fehlertext-Heuristik-Fallback ("fehlgeschlagen" im Body).
+    """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
     tags = TAGS.get(mode, ["portfolio", "briefing"])
-    status = "draft" if "fehlgeschlagen" in briefing_text.lower() else "active"
+    label = MODE_LABELS.get(mode, mode)
     tags_line = " ".join(f"#{t}" for t in tags)
     frontmatter = f"""---
 tags: [{', '.join(tags)}]
@@ -26,7 +38,7 @@ status: {status}
 
 {tags_line}
 
-# Portfolio Briefing — {mode} — {date}
+# Portfolio-Briefing — {label}, {date}
 
 {briefing_text}
 """

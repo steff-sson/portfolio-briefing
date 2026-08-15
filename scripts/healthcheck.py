@@ -1,13 +1,17 @@
-"""Health checks: recent briefing and sc CLI availability."""
+"""Health checks: recent briefing, Live-Config-Snapshot und sc CLI-Verfuegbarkeit.
+
+Keine automatische Live-Abfrage (kein sc-/API-Call) ausserhalb des
+Briefing-Orchestrators: der Zustand wird ausschliesslich aus lokalen Dateien
+(Vault-Briefings, config/snapshot.current.json) bestimmt. Kein Mock-/Seed-
+Fallback — fehlende Live-Daten ergeben einen roten Status.
+"""
 from __future__ import annotations
 
 import shutil
-import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
-from scripts import send_telegram
-
+from scripts import send_telegram, snapshot
 
 VAULT_DIR = Path.home() / "docs" / "notizen" / "portfolio-briefings"
 
@@ -22,33 +26,36 @@ def _latest_briefing_age_hours() -> float | None:
     return (datetime.now() - mtime).total_seconds() / 3600
 
 
-def _sc_authenticated() -> bool:
-    if shutil.which("sc") is None:
-        return False
-    try:
-        subprocess.run(
-            ["sc", "broker", "overview", "--json"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
-        return True
-    except Exception:
-        return False
+def _live_config_status() -> tuple[bool, str]:
+    """Live-Config-Zustand ohne Live-Abfrage: Snapshot vorhanden + lesbar?
+
+    Erstlauf/Seed-Migration steht aus, solange config/snapshot.current.json
+    fehlt oder korrupt ist (roter Status, kein Mock-Fallback).
+    """
+    current = snapshot.read_snapshot(snapshot.CURRENT_PATH)
+    if current is None:
+        return False, "Kein Live-Snapshot (config/snapshot.current.json fehlt/korrupt) — Erstlauf/Seed-Migration noetig."
+    return True, f"Live-Snapshot vorhanden (captured_at={current.get('captured_at')})"
+
+
+def _sc_available() -> bool:
+    return shutil.which("sc") is not None
 
 
 def check_health() -> dict:
     age = _latest_briefing_age_hours()
-    sc_ok = _sc_authenticated()
+    live_ok, live_note = _live_config_status()
+    sc_ok = _sc_available()
     age_ok = age is not None and age < 48
     warnings: list[str] = []
     if age is None:
         warnings.append("Kein Briefing im Vault gefunden.")
     elif not age_ok:
         warnings.append(f"Letztes Briefing ist {age:.1f}h alt.")
+    if not live_ok:
+        warnings.append(live_note)
     if not sc_ok:
-        warnings.append("sc CLI nicht verfügbar oder nicht authentifiziert.")
+        warnings.append("sc CLI nicht im PATH (Live-Abruf erst nach `sc login` moeglich).")
 
     status = "green" if not warnings else "red"
     if warnings:
@@ -61,7 +68,8 @@ def check_health() -> dict:
     return {
         "status": status,
         "latest_briefing_age_hours": age,
-        "sc_authenticated": sc_ok,
+        "live_snapshot_ok": live_ok,
+        "sc_available": sc_ok,
         "warnings": warnings,
     }
 

@@ -6,6 +6,9 @@ __pycache__/
 config/portfolio.json
 config/transactions.json
 config/strategy.yaml
+config/pipeline.yaml
+config/snapshots/
+config/snapshot.current.json
 *.egg-info/
 .pytest_cache/
 .mypy_cache/

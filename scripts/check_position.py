@@ -1,4 +1,8 @@
-"""Deterministic pre-trade guardrail checks for portfolio-briefing."""
+"""Deterministic pre-trade guardrail checks for portfolio-briefing.
+
+Live-First: Portfolio kommt aus dem Snapshot-Modul (config/snapshot.current.json).
+Kein Mock-/Seed-Fallback — fehlende Live-Config ergibt einen klaren Fehlerstatus.
+"""
 from __future__ import annotations
 
 import json
@@ -7,9 +11,10 @@ from pathlib import Path
 
 import yaml
 
+from scripts import snapshot
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
-MOCK = ROOT / "tests" / "mock_data" / "portfolio.json"
 VAULT = Path.home() / "docs" / "notizen" / "portfolio-theses"
 
 SECTOR_FALLBACK = {
@@ -25,9 +30,16 @@ def _load(path: Path, loader):
         return loader(f)
 
 
-def _load_portfolio():
-    path = CONFIG / "portfolio.json" if (CONFIG / "portfolio.json").exists() else MOCK
-    return _load(path, json.load)
+def _load_portfolio() -> dict | None:
+    """Live-Portfolio aus dem Snapshot-Modul (config/snapshot.current.json).
+
+    Kein Mock-/Seed-Fallback: fehlender/korrupter Snapshot -> None; der
+    Aufrufer liefert dann einen klaren Fehlerstatus statt Fake-Daten.
+    """
+    current = snapshot.read_snapshot(snapshot.CURRENT_PATH)
+    if current is None:
+        return None
+    return current.get("portfolio")
 
 
 def _sector(holding: dict, lookup: dict) -> str:
@@ -54,6 +66,12 @@ def _thesis_exists(ticker: str) -> bool:
 def check_buy(ticker: str, quantity: float, price: float) -> dict:
     """Run guardrail checks for a planned buy."""
     portfolio = _load_portfolio()
+    if portfolio is None:
+        return {
+            "ticker": ticker,
+            "error": "Keine Live-Config: config/snapshot.current.json fehlt oder ist korrupt "
+                     "(Erstlauf/Seed-Migration noetig, kein Mock-Fallback).",
+        }
     strategy = _load(CONFIG / "strategy.yaml", yaml.safe_load)
     lookup = _load(CONFIG / "etf_lookup.json", json.load)
     limits = strategy.get("satellite_limits", {})
@@ -107,5 +125,7 @@ if __name__ == "__main__":
     kwargs = dict(zip(sys.argv[1::2], sys.argv[2::2]))
     result = check_buy(kwargs["--ticker"], float(kwargs["--quantity"]), float(kwargs["--price"]))
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    if result.get("error"):
+        sys.exit(1)  # fehlende Live-Config ist ein Fehlerstatus, kein Warn-Exit
     if result.get("verdict") == "block":
         sys.exit(1)

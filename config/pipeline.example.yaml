@@ -1,0 +1,49 @@
+# config/pipeline.example.yaml — nicht-sensitive Pipeline-Parameter (Defaults).
+#
+# WICHTIG: Die Implementierung laedt KEINE pipeline.yaml — die Werte unten
+# dokumentieren die aktuell im Code hartkodierten Defaults. Werte hier
+# aendern bewirkt nichts; zum Anpassen muss der Code geaendert werden.
+# Eine lokale `config/pipeline.yaml` (falls je eingefuehrt) ist gitignored.
+#
+# KEINE Secrets in dieser Datei. Secrets bleiben in ~/.config/automation/config.env:
+#   NEURALWATT_API_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+
+models:
+  draft:
+    name: "deepseek-v4-flash"          # scripts/llm_briefing.generate_draft
+    temperature: 0.3
+    max_tokens: 4096
+    timeout_seconds: 60
+    retries: 2                         # 1 Retry nach Backoff (2 ** attempt)
+  review:
+    name: "glm-5.2"                    # scripts/llm_review.review_draft
+    temperature: 0.3
+    max_tokens: 4096
+    timeout_seconds: 60
+  revise:
+    name: "deepseek-v4-flash"          # scripts/llm_revise.revise_draft
+    temperature: 0.2
+    max_tokens: 4096
+    timeout_seconds: 60
+
+review_loop:
+  max_revisions: 1                     # run_briefing.MAX_REVISIONS (kein Endlos-Loop)
+  revise_trigger: "revise"             # GLM overall_verdict loest Revision aus
+  revise_on: "major"                   # Severity ab der revidiert wird
+  block_threshold: "critical"          # critical/block -> fail-closed, keine Revision
+
+verify:
+  number_tolerance_pp: 0.5             # verify.NUMBER_TOLERANCE_PP (Zahlen gegen deterministic_summary)
+  block_severities: ["critical", "major"]
+  pass_severities: ["minor", "info"]   # blockieren Versand nie
+
+fail_closed:
+  on_llm_error: "block"                # Exception -> kein Versand, keine Vault-Datei
+  on_review_parse_error: "block"
+  on_unresolved_critical: "block"
+  on_verify_draft_fail: "block"
+
+dry_run:
+  skip_llm: true
+  skip_telegram: true
+  archive_to_vault: true               # {date}-{mode}-dryrun.md, status: draft

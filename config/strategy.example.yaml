@@ -1,55 +1,88 @@
+# config/strategy.example.yaml — strukturelle Vorlage fuer config/strategy.yaml
+#
+# WICHTIG: Diese Datei ist NUR eine strukturelle Vorlage (Feldnamen, Typen,
+# required/optional). Die hier gezeigten Werte sind Beispielwerte, KEINE
+# persoenliche Strategie. Eine echte Strategie gehoert nach config/strategy.yaml
+# (gitignored) und wird dort in einer separaten Session entwickelt.
+#
+# Das erwartete Schema ist pipeline-fixed (scripts/analyze.py, STRATEGY_SCHEMA):
+# - required: portfolio, satellite_limits (ohne sie koennen keine Checks laufen)
+# - permissive: unbekannte Felder werden ignoriert (nur required-Felder validiert)
+# - Validierung: core_pct + satellite_pct == 100, max_position_pct <= max_sector_pct,
+#   max_positions >= 1, Typ-Pruefung (Prozentwerte int|float, max_positions int)
+# - Ungueltige/fehlende config/strategy.yaml -> fail-closed (kein Versand, Alert)
+#
+# Technische Schnittstellen-Doku: docs/strategy.md
+
+# optional — Metadaten der Strategie
 meta:
-  version: 1
-  created: "2026-08-06"
-  last_reviewed: "2026-08-06"
-  next_review: "2026-11-06"
-  cooling_off_days: 30
+  version: 1                      # int — Versionsnummer der Strategie
+  created: "2026-08-06"           # date (YYYY-MM-DD) — Erstellungsdatum
+  last_reviewed: "2026-08-06"     # date (YYYY-MM-DD) — letztes Review
+  next_review: "2026-11-06"       # date (YYYY-MM-DD) — naechstes Review
+  cooling_off_days: 30            # int — Abkuehlfrist bei Strategieaenderungen
 
+# optional — Anlegerprofil (rein informativ, keine Pipeline-Checks)
 investor:
-  horizon: ">15y"
-  income_source: "monthly_savings"
-  purpose: "retirement"
-  risk_profile: "moderate"
+  horizon: ">15y"                 # str — Anlagehorizont
+  income_source: "monthly_savings"  # str — Einkommensquelle
+  purpose: "retirement"           # str — Sparziel
+  risk_profile: "moderate"        # str — Risikoprofil
 
+# required — Portfolio-Struktur und Zielquote (Basis fuer Core/Satellite-Checks)
 portfolio:
-  core_pct: 75.0
-  satellite_pct: 25.0
-  core_description: "FTSE All-World (Acc)"
-  rebalancing:
-    method: "threshold"
-    threshold_pct: 5.0
+  core_pct: 75.0                  # int|float (%) — Core-Zielquote; gelesen von
+                                  #   calculate_core_satellite, calculate_drift
+  satellite_pct: 25.0             # int|float (%) — Satellite-Zielquote;
+                                  #   muss mit core_pct zusammen 100 ergeben
+  core_description: "FTSE All-World (Acc)"  # str — Beschreibung des Cores
+  rebalancing:                    # optional — Rebalancing-Toleranz
+    method: "threshold"           # str — Methode (z. B. "threshold")
+    threshold_pct: 5.0            # int|float (pp) — Toleranzband; gelesen von
+                                  #   calculate_core_satellite, calculate_drift
 
+# required — Grenzwerte fuer Satellite-Positionen
 satellite_limits:
-  max_position_pct: 5.0
-  max_sector_pct: 15.0
-  max_positions: 10
-  max_turnover_annual_pct: 30.0
-  max_trades_per_quarter: 3
+  max_position_pct: 5.0           # int|float (%) — max. Einzelposition; gelesen von
+                                  #   calculate_single_position_max
+  max_sector_pct: 15.0            # int|float (%) — max. Sektor-Konzentration; gelesen von
+                                  #   calculate_sector_concentration; muss >= max_position_pct sein
+  max_positions: 10               # int — max. Anzahl Satellite-Positionen; muss >= 1 sein
+  max_turnover_annual_pct: 30.0   # int|float (%) — max. Jahresumschlag; gelesen von
+                                  #   calculate_turnover
+  max_trades_per_quarter: 3       # int — max. Trades pro Quartal
 
+# optional — Sektor-Praeferenzen (kein harter Pipeline-Check)
 sectors:
-  preferred: ["technology", "healthcare"]
-  excluded: ["tobacco", "fossil_fuels"]
-  notes: ""
+  preferred: ["technology", "healthcare"]  # list[str] — bevorzugte Sektoren
+  excluded: ["tobacco", "fossil_fuels"]    # list[str] — ausgeschlossene Sektoren
+  notes: ""                       # str — freie Notizen
 
+# optional — Regionen-Limits (kein harter Pipeline-Check)
 regions:
-  core: "global"
-  satellite_restriction: "none"
+  core: "global"                  # str — Core-Region
+  satellite_restriction: "none"   # str — Satellite-Einschraenkung
 
+# optional — Thesis-Anforderungen
 thesis:
-  required: true
-  template: "thesis_template.md"
+  required: true                  # bool — Thesis vor Satellite-Kauf Pflicht
+  template: "thesis_template.md"  # str — Vorlage-Dateiname
 
+# optional — Alert-/Warn-Konfiguration (frei; gelesen wird aktuell
+# alerts.on_thesis_expiring_soon_days von check_thesis_deadlines)
 alerts:
-  on_position_over_5pct: true
-  on_sector_over_15pct: true
-  on_positions_exceed_max: true
-  on_turnover_exceeded: true
-  on_thesis_expiring_soon_days: 30
-  on_core_drift_over_threshold: true
-  warn_on_position_over_4pct: true
-  warn_on_correlation_to_core: 0.8
+  on_position_over_5pct: true     # bool
+  on_sector_over_15pct: true      # bool
+  on_positions_exceed_max: true   # bool
+  on_turnover_exceeded: true      # bool
+  on_thesis_expiring_soon_days: 30  # int — Ablauf-Frist Thesen (Tage); gelesen von
+                                    #   check_thesis_deadlines
+  on_core_drift_over_threshold: true  # bool
+  warn_on_position_over_4pct: true    # bool
+  warn_on_correlation_to_core: 0.8    # float
 
+# optional — Review-Rhythmus
 review_schedule:
-  quarterly_strategy_review: true
-  annual_full_review: true
-  triggers: ["life_event", "market_crash_20pct", "income_change_30pct"]
+  quarterly_strategy_review: true       # bool
+  annual_full_review: true              # bool
+  triggers: ["life_event", "market_crash_20pct", "income_change_30pct"]  # list[str]
