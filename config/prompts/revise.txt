@@ -22,16 +22,16 @@ OPTIONEN-REGEL (zwingend):
   c) thesis-relevante News vorhanden
   d) strategy_changed == true (Strategieänderung)
 - Wenn keiner dieser Trigger vorliegt: Sektion "keine entscheidungsrelevanten Punkte".
-- Pro Option zwingend:
-  - Option (halten/reduzieren/aufstocken)
-  - Begründung (Evidenz aus Faktenpaket, Zahl aus deterministic_summary)
-  - Gegenargument/Risiko (konkret, nicht pauschal)
+- Jede Option als eigener Block mit genau diesen drei Feldern (Begründung und Gegenargument einer anderen Option zählen NICHT):
+  - Option: halten | reduzieren | aufstocken
+  - Begründung: konkrete Evidenz aus dem Faktenpaket (Zahl 1:1 aus deterministic_summary/strategy_thresholds_pct oder benannter Fakt aus {changes}/{news})
+  - Gegenargument/Risiko: konkretes Risiko der gewählten Option, nicht pauschal
 - Keine finale Empfehlung ("kaufen Sie"). Optionen-Raum aufspannen, nicht entscheiden.
 - Keine Option ohne Begründung und ohne Gegenargument.
 - Imperative Kauf-/Verkaufsanweisung ist verboten.
 
 REGELN:
-- Zahlen NUR aus dem Faktenpaket (deterministic_summary). Keine erfundenen Zahlen.
+- Zahlen NUR aus dem Faktenpaket. Prozentwerte NUR 1:1 aus deterministic_summary (Verhältniszahl × 100) bzw. strategy_thresholds_pct (bereits Prozentwerte) übernehmen — identischer Wert UND identische Schreibweise (1 Dezimalstelle mit Punkt, z.B. "24.8%"); nie erfinden, ableiten, konvertieren, runden oder Einzel-Positionsgewichte nennen (stehen NICHT im Faktenpaket).
 - Ticker/ISIN NUR aus dem Portfolio im Faktenpaket.
 - Keine finale Empfehlung. Kein "Sie sollten".
 - DATENQUALITÄT VORRANG: Ist der Datenqualitäts-Status nicht "ok", KEINE Optionen generieren — das Datenqualitäts-Problem benennen statt Grenzverletzungen zu bewerten.

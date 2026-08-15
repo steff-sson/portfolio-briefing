@@ -18,10 +18,12 @@ T2 = "2026-08-13T10:05:00+00:00"
 @pytest.fixture
 def paths(monkeypatch, tmp_path):
     current = tmp_path / "config" / "snapshot.current.json"
+    staged = tmp_path / "config" / "snapshot.staged.json"
     archive = tmp_path / "config" / "snapshots" / "archive"
     current.parent.mkdir(parents=True, exist_ok=True)
     archive.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(snapshot, "CURRENT_PATH", current)
+    monkeypatch.setattr(snapshot, "STAGED_PATH", staged)
     monkeypatch.setattr(snapshot, "ARCHIVE_DIR", archive)
     return current, archive
 
@@ -187,3 +189,73 @@ def test_read_latest_archive_skips_corrupt_newest(paths, portfolio, transactions
     previous = snapshot.load_previous()
     assert previous is not None
     assert previous["captured_at"] == T1  # korruptes "neuestes" Archiv uebersprungen, naechstes lesbares genommen
+
+
+# --- Staged-Snapshot (P0.1: Baseline erst nach erfolgreichem final_gate) -------
+
+
+def test_capture_staged_writes_staged_file(paths, portfolio, transactions):
+    """capture_staged schreibt nur staged — Baseline (current) bleibt unangetastet."""
+    current, archive = paths
+    result = snapshot.capture_staged(portfolio, transactions, mode="monday", captured_at=T1)
+
+    assert result["snapshot"]["captured_at"] == T1
+    assert result["staged_path"] == str(snapshot.STAGED_PATH)
+    assert snapshot.STAGED_PATH.exists()
+    assert _read(snapshot.STAGED_PATH) == result["snapshot"]
+    # Baseline unveraendert: kein current, kein Archiv-Eintrag, kein Vorgaenger
+    assert _read(current) is None
+    assert snapshot.load_previous() is None
+    assert list(archive.glob("*.json")) == []
+
+
+def test_promote_staged_archives_previous_and_promotes(paths, portfolio, transactions):
+    """promote_staged: Vorgaenger wird archiviert, staged -> current, staged geloescht."""
+    current, archive = paths
+    first = snapshot.capture(portfolio, transactions, mode="monday", captured_at=T1)
+    staged = snapshot.capture_staged(portfolio, transactions, mode="monday", captured_at=T2)
+
+    result = snapshot.promote_staged()
+
+    assert result is not None
+    assert result["snapshot"] == staged["snapshot"]
+    assert result["previous"] == first["snapshot"]
+    assert result["archive_path"] == str(archive / "snapshot-20260813-100000.json")
+    assert _read(current) == staged["snapshot"]  # Baseline = staged
+    assert not snapshot.STAGED_PATH.exists()  # staged geloescht
+    assert _read(snapshot.STAGED_PATH) is None
+    archived = list(archive.glob("*.json"))
+    assert len(archived) == 1
+    assert _read(archived[0]) == first["snapshot"]  # Vorgaenger archiviert
+
+
+def test_promote_staged_no_staged_returns_none(paths):
+    """Kein staged (fehlend) -> None, kein Schreiben."""
+    current, archive = paths
+    assert snapshot.promote_staged() is None
+    assert not current.exists()
+    assert not list(archive.glob("*.json"))
+
+
+def test_discard_staged_removes_staged(paths, portfolio, transactions):
+    snapshot.capture_staged(portfolio, transactions, captured_at=T1)
+    assert snapshot.STAGED_PATH.exists()
+
+    assert snapshot.discard_staged() is True
+    assert not snapshot.STAGED_PATH.exists()
+
+
+def test_discard_staged_no_staged_returns_false(paths):
+    assert snapshot.discard_staged() is False
+
+
+def test_staged_is_atomic(paths, portfolio, transactions):
+    """Staged wird atomar geschrieben: kein Temp-Rest, kein korruptes Teil-File."""
+    current, _ = paths
+    snapshot.capture_staged(portfolio, transactions, captured_at=T1)
+    r2 = snapshot.capture_staged(portfolio, transactions, captured_at=T2)
+
+    leftovers = [p for p in snapshot.STAGED_PATH.parent.glob(".tmp-snapshot-*")]
+    assert leftovers == []
+    assert _read(snapshot.STAGED_PATH) == r2["snapshot"]
+    assert not current.exists()  # Baseline unangetastet

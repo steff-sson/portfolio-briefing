@@ -131,9 +131,31 @@ class TestVerifyDraft:
         findings = verify.verify_draft(facts, draft)
         assert any(f["severity"] == "critical" and "88.8" in f["issue"] for f in findings)
 
-    def test_number_within_tolerance_passes(self):
-        # 24.8 vs max_position_weight 0.2479 -> 24.79% (+0.01pp, innerhalb ±0.5pp)
+    def test_number_matching_allowed_value_exactly_passes(self):
+        # 24.8 == max_position_weight 0.2479 -> 24.8% (1:1 auf 1 Dezimalstelle)
         assert verify.verify_draft(VALID_FACTS, VALID_DRAFT) == []
+
+    def test_number_within_old_tolerance_but_not_matching_is_critical(self):
+        """Post-Live-Fix P0.3: 25.2% lag frueher innerhalb der ±0.5pp-Toleranz
+        zu 24.8% — jetzt zwingend 1:1-Match auf 1 Dezimalstelle -> critical."""
+        draft = VALID_DRAFT.replace("24.8%", "25.2%")
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert any(f["severity"] == "critical" and "25.2" in f["issue"] for f in findings)
+
+    def test_extra_precision_number_is_normalized(self):
+        """24.79% (deterministic_summary exakt) wird auf die 1-Dezimal-
+        Schreibweise der ZULÄSSIGE-ZAHLEN-Liste normalisiert -> pass."""
+        draft = VALID_DRAFT.replace("24.8%", "24.79%")
+        assert verify.verify_draft(VALID_FACTS, draft) == []
+
+    def test_comma_decimal_percentage_is_checked(self):
+        """P0.3: Komma-Dezimalen werden erkannt — korrekter Wert passiert,
+        halluzinierter Wert (88,8%) bleibt critical (kein Umgehen der Pruefung)."""
+        draft = VALID_DRAFT.replace("24.8%", "24,8%")
+        assert verify.verify_draft(VALID_FACTS, draft) == []
+        draft = VALID_DRAFT.replace("24.8%", "88,8%")
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert any(f["severity"] == "critical" and "88.8" in f["issue"] for f in findings)
 
     def test_unknown_ticker_is_major(self):
         draft = VALID_DRAFT.replace("AAPL", "MSFT")
@@ -493,6 +515,73 @@ class TestOptionContract:
         }
         findings = verify.verify_draft(facts, self._option_draft(reason=True, counter=True))
         assert any(f["severity"] == "major" and "Trigger" in f["issue"] for f in findings)
+
+    # --- Post-Live-Fix P0.3: Pro-Options-Block-Pruefung ---
+
+    @staticmethod
+    def _two_option_draft(*, second_counter: bool) -> str:
+        """Zwei Optionen in getrennten Absaetzen (Leerzeile getrennt).
+
+        Erster Block vollstaendig (Begruendung + Gegenargument), zweiter Block
+        nur mit Begruendung — Gegenargument des ersten Blocks darf NICHT
+        fuer den zweiten zaehlen.
+        """
+        second = (
+            "- Option: reduzieren\n"
+            "- Begründung: Einzelposition 24.8% nahe der Grenze.\n"
+            + ("- Gegenargument/Risiko: Verkauf realisiert Kursgewinne steuerlich.\n" if second_counter else "")
+        )
+        return (
+            "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%.\n\n"
+            "## Datenqualität\nDatenqualität: ok\n\n"
+            "## Entscheidungsrelevante Punkte\n"
+            "- Option: halten\n"
+            "- Begründung: Drift 6.4% über der Grenze.\n"
+            "- Gegenargument/Risiko: Drift ist nur ein gelber Punkt.\n"
+            "\n"
+            + second
+            + "\n## Strategie-Abgleich\nCore-Ziel 75%.\n\n"
+            "## Relevante News & Veränderungen\n—"
+        )
+
+    def test_option_missing_counter_in_its_own_paragraph_is_major(self):
+        """Gegenargument einer ANDEREN Option zaehlt nicht: der zweite Block
+        ohne Gegenargument bleibt major, obwohl die Sektion einen Marker hat."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = self._two_option_draft(second_counter=False)
+        findings = verify.verify_draft(facts, draft)
+        assert any(
+            f["severity"] == "major" and "Gegenargument" in f["issue"] for f in findings
+        )
+        assert not any("Begründung" in f["issue"] for f in findings)
+
+    def test_option_missing_reason_in_its_own_paragraph_is_major(self):
+        """Begruendung einer ANDEREN Option zaehlt nicht fuer den Block ohne
+        eigene Begruendung."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = (
+            "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%.\n\n"
+            "## Datenqualität\nDatenqualität: ok\n\n"
+            "## Entscheidungsrelevante Punkte\n"
+            "- Option: halten\n"
+            "- Begründung: Drift 6.4% über der Grenze.\n"
+            "- Gegenargument/Risiko: Drift ist nur ein gelber Punkt.\n"
+            "\n"
+            "- Option: reduzieren\n"
+            "- Gegenargument/Risiko: Verkauf realisiert Kursgewinne steuerlich.\n"
+            "\n## Strategie-Abgleich\nCore-Ziel 75%.\n\n"
+            "## Relevante News & Veränderungen\n—"
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert any(
+            f["severity"] == "major" and "Begründung" in f["issue"] for f in findings
+        )
+
+    def test_options_in_separate_paragraphs_each_complete_pass(self):
+        """Zwei Optionen, jeder Block vollstaendig -> keine Findings."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = self._two_option_draft(second_counter=True)
+        assert verify.verify_draft(facts, draft) == []
 
 
 class TestFinalGate:

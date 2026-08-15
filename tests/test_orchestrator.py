@@ -4,7 +4,8 @@ Keine echten API-/Telegram-Aufrufe: generate_draft, review_draft und
 revise_draft werden gemockt, send_briefing wird gefaked. Fail-closed-Pfade
 duerfen keine Briefing-Datei im Vault anlegen. Datenbeschaffung: Dry-Run
 via load_mock; produktiver Lauf via load_previous -> refresh_from_sc ->
-snapshot.capture -> diff.diff_snapshots (kein update_config).
+capture_staged -> diff.diff_snapshots; staged wird erst nach final_gate +
+Render promoted (kein update_config).
 """
 from __future__ import annotations
 
@@ -46,33 +47,49 @@ REVISE_REVIEW = {
 }
 
 
-def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions, news=None) -> None:
+def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions, news=None) -> dict:
     """Mockt alle Pipeline-Abhaengigkeiten ausser LLM/Versand (werden je Test gesetzt).
 
-    Datenbeschaffung: snapshot.load_previous/capture und diff.diff_snapshots
-    laufen mit den Mock-Daten (rein, deterministisch); refresh_from_sc und
-    load_mock liefern die Mock-Daten.
+    Datenbeschaffung: snapshot.load_previous/capture_staged und
+    diff.diff_snapshots laufen mit den Mock-Daten (rein, deterministisch);
+    refresh_from_sc und load_mock liefern die Mock-Daten. capture_staged/
+    promote_staged/discard_staged werden mit Call-Tracker gemockt (staged
+    Lifecycle: Baseline bleibt bis final_gate+Render unangetastet).
+    Rueckgabe: ``calls``-Tracker {"capture_staged", "promote_staged",
+    "discard_staged"}.
     """
+    calls = {"capture_staged": 0, "promote_staged": 0, "discard_staged": 0}
     monkeypatch.setattr(run_briefing, "_setup_logging", lambda: None)
     monkeypatch.setattr(run_briefing, "VAULT_DIR", tmp_path)
     previous = snapshot.build_snapshot(
         portfolio, transactions, mode="monday", captured_at="2026-08-06T10:00:00+00:00"
     )
     monkeypatch.setattr(snapshot, "load_previous", lambda: previous)
-    monkeypatch.setattr(
-        snapshot,
-        "capture",
-        lambda p, t, **kw: {
+
+    def _capture_staged(p, t, **kw):
+        calls["capture_staged"] += 1
+        return {
             "snapshot": snapshot.build_snapshot(p, t, **kw),
-            "previous": previous,
-            "archive_path": None,
-        },
-    )
+            "staged_path": str(tmp_path / "snapshot.staged.json"),
+        }
+
+    def _promote_staged():
+        calls["promote_staged"] += 1
+        return {"snapshot": {}, "previous": previous, "archive_path": None}
+
+    def _discard_staged():
+        calls["discard_staged"] += 1
+        return True
+
+    monkeypatch.setattr(snapshot, "capture_staged", _capture_staged)
+    monkeypatch.setattr(snapshot, "promote_staged", _promote_staged)
+    monkeypatch.setattr(snapshot, "discard_staged", _discard_staged)
     monkeypatch.setattr(sc_bridge, "refresh_from_sc", lambda: (portfolio, transactions))
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (portfolio, transactions))
     monkeypatch.setattr(analyze, "load_strategy", lambda: EMPTY_STRATEGY)
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: news or [])
+    return calls
 
 
 def _fake_send(sent):
@@ -387,7 +404,7 @@ def test_revise_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, trans
 
 
 def test_non_dry_run_refresh_capture_diff_before_analyze(monkeypatch, tmp_path, portfolio, transactions):
-    """Reihenfolge: load_previous -> refresh_from_sc -> capture -> diff -> analyze; kein load_mock."""
+    """Reihenfolge: load_previous -> refresh -> capture_staged -> diff -> analyze; kein load_mock."""
     order = []
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     previous = snapshot.build_snapshot(portfolio, transactions, mode="monday", captured_at="2026-08-06T10:00:00+00:00")
@@ -400,10 +417,10 @@ def test_non_dry_run_refresh_capture_diff_before_analyze(monkeypatch, tmp_path, 
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (order.append("load_mock"), (portfolio, transactions))[1])
     monkeypatch.setattr(
         snapshot,
-        "capture",
+        "capture_staged",
         lambda p, t, **kw: (
-            order.append("capture"),
-            {"snapshot": snapshot.build_snapshot(p, t, **kw), "previous": previous, "archive_path": None},
+            order.append("capture_staged"),
+            {"snapshot": snapshot.build_snapshot(p, t, **kw), "staged_path": str(tmp_path / "snapshot.staged.json")},
         )[1],
     )
     monkeypatch.setattr(diff, "diff_snapshots", lambda prev, cur: (order.append("diff"), changes)[1])
@@ -415,7 +432,7 @@ def test_non_dry_run_refresh_capture_diff_before_analyze(monkeypatch, tmp_path, 
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 0
-    assert order == ["load_previous", "refresh", "capture", "diff", "analyze"]
+    assert order == ["load_previous", "refresh", "capture_staged", "diff", "analyze"]
     assert "load_mock" not in order  # produktiver Lauf nutzt nie Mock-Daten
 
 
@@ -462,15 +479,15 @@ def test_dry_run_passes_changes_none(monkeypatch, tmp_path, portfolio, transacti
 
 
 def test_snapshot_capture_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """snapshot.capture-Fehler -> fail-closed: rc 1, kein Output, kein Mock, nur Alert."""
+    """snapshot.capture_staged-Fehler -> fail-closed: rc 1, kein Output, kein Mock, nur Alert."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     mock_calls = []
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (mock_calls.append(1), (portfolio, transactions))[1])
 
-    def _broken_capture(p, t, **kw):
+    def _broken_capture_staged(p, t, **kw):
         raise OSError("Snapshot-Verzeichnis nicht beschreibbar")
 
-    monkeypatch.setattr(snapshot, "capture", _broken_capture)
+    monkeypatch.setattr(snapshot, "capture_staged", _broken_capture_staged)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
 
@@ -481,3 +498,73 @@ def test_snapshot_capture_error_is_fail_closed(monkeypatch, tmp_path, portfolio,
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert "facts failed" in sent[0][0]
+
+
+# --- Staged-Snapshot-Lifecycle (P0.1): Baseline erst nach final_gate+Render ----
+
+
+def test_failed_run_discards_staged_snapshot(monkeypatch, tmp_path, portfolio, transactions):
+    """Fehler nach capture_staged (Review-LLMError) -> staged verworfen, kein promote.
+
+    Die produktive Baseline (snapshot.current.json) darf durch einen
+    fehlgeschlagenen Lauf nie fortgeschrieben werden.
+    """
+    calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+
+    def _bad_review(facts_package, draft):
+        raise llm_review.LLMError("Review-Antwort ist kein gueltiges JSON")
+
+    monkeypatch.setattr(llm_review, "review_draft", _bad_review)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert calls["capture_staged"] == 1  # Live-Stand wurde staged
+    assert calls["promote_staged"] == 0  # Baseline NICHT fortgeschrieben
+    assert calls["discard_staged"] >= 1  # staged verworfen (Start-Cleanup + finally)
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "alert"
+
+
+def test_successful_run_promotes_staged(monkeypatch, tmp_path, portfolio, transactions):
+    """Erfolgreicher Lauf: staged wird genau einmal promoted (nach final_gate+Render).
+
+    Nach Promotion wird staged im finally nicht erneut verworfen — der
+    Start-Cleanup-Discard ist der einzige discard-Aufruf.
+    """
+    calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert calls["capture_staged"] == 1
+    assert calls["promote_staged"] == 1  # staged -> Baseline
+    assert calls["discard_staged"] == 1  # nur Start-Cleanup (finally skipped nach promote)
+    assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+def test_staged_snapshot_not_promoted_on_gate_block(monkeypatch, tmp_path, portfolio, transactions):
+    """final_gate blockt -> staged verworfen, keine Promotion, kein Versand."""
+    calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    review = {"findings": [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}], "overall_verdict": "block"}
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert calls["capture_staged"] == 1
+    assert calls["promote_staged"] == 0  # Gate-Block: Baseline unangetastet
+    assert calls["discard_staged"] >= 1  # staged verworfen
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "final_gate" in sent[0][0]

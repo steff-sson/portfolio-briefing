@@ -47,6 +47,18 @@ class ScCommandError(ScBridgeError):
     """sc-Prozess endete mit non-zero Exit-Code."""
 
 
+class ScSessionExpiredError(ScBridgeError):
+    """sc-Session abgelaufen (no_session) — interaktives `sc login` erforderlich."""
+
+
+class ScReloginRequiredError(ScBridgeError):
+    """sc-Session erfordert Re-Login (REFRESH_RELOGIN_REQUIRED) — `sc login` erforderlich."""
+
+
+class ScSecretStorageError(ScBridgeError):
+    """sc Secret Storage nicht verfuegbar (secret_storage_unavailable) — System-Pruefung."""
+
+
 class ScInvalidJsonError(ScBridgeError):
     """sc-Ausgabe war kein gueltiges JSON (oder unerwartete Form)."""
 
@@ -63,8 +75,41 @@ def _sc_available() -> bool:
     return shutil.which("sc") is not None
 
 
+# Auth-Fehlerklassen der scalable-cli (Quelle: github.com/ScalableCapital/scalable-cli,
+# Issue #5): no_session / REFRESH_RELOGIN_REQUIRED / secret_storage_unavailable.
+_AUTH_MARKERS: tuple[tuple[str, type[ScBridgeError]], ...] = (
+    ("REFRESH_RELOGIN_REQUIRED", ScReloginRequiredError),
+    ("no_session", ScSessionExpiredError),
+    ("secret_storage_unavailable", ScSecretStorageError),
+)
+
+_AUTH_MESSAGES: dict[str, str] = {
+    "REFRESH_RELOGIN_REQUIRED": "sc session expired (REFRESH_RELOGIN_REQUIRED) — run interactive `sc login`",
+    "no_session": "sc session expired (no_session) — run interactive `sc login`",
+    "secret_storage_unavailable": "sc secret storage unavailable (secret_storage_unavailable) — check system/keyring configuration",
+}
+
+
+def _auth_error_from_text(text: str) -> ScBridgeError | None:
+    """Erkennt auth-spezifische sc-Fehlerklassen in stdout/stderr-Text.
+
+    Liefert die passende Exception-Instanz oder None (kein Auth-Marker).
+    Messages enthalten nur Status-Strings — niemals Session-/Token-/User-Daten.
+    """
+    for marker, exc_cls in _AUTH_MARKERS:
+        if marker in text:
+            return exc_cls(_AUTH_MESSAGES[marker])
+    return None
+
+
 def _run_sc(args: list[str]) -> str:
-    """Fuehrt sc aus und liefert stdout als Text; non-zero Exit -> ScCommandError."""
+    """Fuehrt sc aus und liefert stdout als Text; non-zero Exit -> ScCommandError.
+
+    Auth-spezifische CLI-Fehler (no_session / REFRESH_RELOGIN_REQUIRED /
+    secret_storage_unavailable) in stdout/stderr werden als spezifische
+    ScBridgeError-Subklasse geworfen (differenzierte, handlungsorientierte
+    Fehler statt generischem ScCommandError).
+    """
     try:
         result = subprocess.run(
             ["sc", *args],
@@ -73,6 +118,9 @@ def _run_sc(args: list[str]) -> str:
             check=True,
         )
     except subprocess.CalledProcessError as e:
+        auth_error = _auth_error_from_text(f"{e.stderr or ''}\n{e.stdout or ''}")
+        if auth_error is not None:
+            raise auth_error from e
         raise ScCommandError(f"sc {' '.join(args)} exited with code {e.returncode}") from e
     return result.stdout
 
@@ -189,6 +237,9 @@ def _extract_items(payload: dict | list, source: str, allow_list: bool = True) -
         return holdings  # Legacy-Holdings
     # CLI-Wrapper-Format
     if payload.get("ok") is not True:
+        auth_error = _auth_error_from_text(json.dumps(payload))
+        if auth_error is not None:
+            raise auth_error
         raise ScInvalidJsonError(f"sc command failed (ok != true) from {source}")
     data = payload.get("data")
     if not isinstance(data, dict):

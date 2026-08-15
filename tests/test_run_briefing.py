@@ -2,8 +2,8 @@
 
 Nutzt ausschliesslich Mock-Daten und Fake-Objekte — keine API-/Telegram-Aufrufe.
 Datenbeschaffung: Dry-Run via sc_bridge.load_mock(); produktiver Lauf via
-snapshot.load_previous -> sc_bridge.refresh_from_sc -> snapshot.capture ->
-diff.diff_snapshots (kein update_config).
+snapshot.load_previous -> sc_bridge.refresh_from_sc -> snapshot.capture_staged
+-> diff.diff_snapshots (kein update_config).
 """
 from __future__ import annotations
 
@@ -40,33 +40,47 @@ VALID_DRAFT = (
 PASS_REVIEW = {"findings": [], "overall_verdict": "pass"}
 
 
-def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions) -> None:
+def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions) -> dict:
     """Mockt alle Pipeline-Abhaengigkeiten ausser LLM/Versand (werden je Test gesetzt).
 
-    Datenbeschaffung: snapshot.load_previous/capture und diff.diff_snapshots
-    laufen mit den Mock-Daten (rein, deterministisch); refresh_from_sc und
-    load_mock liefern die Mock-Daten.
+    Datenbeschaffung: snapshot.load_previous/capture_staged und
+    diff.diff_snapshots laufen mit den Mock-Daten (rein, deterministisch);
+    refresh_from_sc und load_mock liefern die Mock-Daten. Staged-Lifecycle
+    (capture_staged/promote_staged/discard_staged) wird mit Call-Tracker
+    gemockt. Rueckgabe: ``calls``-Tracker.
     """
+    calls = {"capture_staged": 0, "promote_staged": 0, "discard_staged": 0}
     monkeypatch.setattr(run_briefing, "_setup_logging", lambda: None)
     monkeypatch.setattr(run_briefing, "VAULT_DIR", tmp_path)
     previous = snapshot.build_snapshot(
         portfolio, transactions, mode="monday", captured_at="2026-08-06T10:00:00+00:00"
     )
     monkeypatch.setattr(snapshot, "load_previous", lambda: previous)
-    monkeypatch.setattr(
-        snapshot,
-        "capture",
-        lambda p, t, **kw: {
+
+    def _capture_staged(p, t, **kw):
+        calls["capture_staged"] += 1
+        return {
             "snapshot": snapshot.build_snapshot(p, t, **kw),
-            "previous": previous,
-            "archive_path": None,
-        },
-    )
+            "staged_path": str(tmp_path / "snapshot.staged.json"),
+        }
+
+    def _promote_staged():
+        calls["promote_staged"] += 1
+        return {"snapshot": {}, "previous": previous, "archive_path": None}
+
+    def _discard_staged():
+        calls["discard_staged"] += 1
+        return True
+
+    monkeypatch.setattr(snapshot, "capture_staged", _capture_staged)
+    monkeypatch.setattr(snapshot, "promote_staged", _promote_staged)
+    monkeypatch.setattr(snapshot, "discard_staged", _discard_staged)
     monkeypatch.setattr(sc_bridge, "refresh_from_sc", lambda: (portfolio, transactions))
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (portfolio, transactions))
     monkeypatch.setattr(analyze, "load_strategy", lambda: EMPTY_STRATEGY)
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: [])
+    return calls
 
 
 def test_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
@@ -160,11 +174,15 @@ def test_dry_run_uses_mock_without_refresh_snapshot_or_telegram(monkeypatch, tmp
     """Dry-Run: ausschliesslich load_mock — kein refresh, kein Snapshot/Diff, kein Telegram."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     refresh_calls = []
-    capture_calls = []
+    capture_staged_calls = []
+    promote_calls = []
+    discard_calls = []
     diff_calls = []
     sent = []
     monkeypatch.setattr(sc_bridge, "refresh_from_sc", lambda: (refresh_calls.append(1), (portfolio, transactions))[1])
-    monkeypatch.setattr(snapshot, "capture", lambda *a, **kw: (capture_calls.append(1), {})[1])
+    monkeypatch.setattr(snapshot, "capture_staged", lambda *a, **kw: (capture_staged_calls.append(1), {})[1])
+    monkeypatch.setattr(snapshot, "promote_staged", lambda: (promote_calls.append(1), {})[1])
+    monkeypatch.setattr(snapshot, "discard_staged", lambda: (discard_calls.append(1), True)[1])
     monkeypatch.setattr(diff, "diff_snapshots", lambda prev, cur: (diff_calls.append(1), {})[1])
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
 
@@ -172,7 +190,9 @@ def test_dry_run_uses_mock_without_refresh_snapshot_or_telegram(monkeypatch, tmp
 
     assert rc == 0
     assert refresh_calls == []  # kein sc-Aufruf im Dry-Run
-    assert capture_calls == []  # kein Snapshot-Schreiben im Dry-Run
+    assert capture_staged_calls == []  # kein Snapshot-Schreiben im Dry-Run
+    assert promote_calls == []  # kein Promote im Dry-Run
+    assert discard_calls == []  # kein Discard im Dry-Run
     assert diff_calls == []  # kein Diff im Dry-Run
     assert sent == []  # kein Telegram im Dry-Run
     archived = [p.name for p in tmp_path.iterdir()]
@@ -213,9 +233,9 @@ def test_sc_refresh_error_is_fail_closed(exc, msg, monkeypatch, tmp_path, portfo
     """refresh_from_sc-Fehler -> Alert, Exit 1, keine Vault-Datei, kein Snapshot (kein Mock)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
-    capture_calls = []
+    capture_staged_calls = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
-    monkeypatch.setattr(snapshot, "capture", lambda *a, **kw: (capture_calls.append(1), {})[1])
+    monkeypatch.setattr(snapshot, "capture_staged", lambda *a, **kw: (capture_staged_calls.append(1), {})[1])
 
     def _raise_sc_error():
         raise exc
@@ -226,9 +246,37 @@ def test_sc_refresh_error_is_fail_closed(exc, msg, monkeypatch, tmp_path, portfo
 
     assert rc == 1
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
-    assert capture_calls == []  # kein Snapshot nach Fehler
+    assert capture_staged_calls == []  # kein Snapshot nach Fehler
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert msg in sent[0][0]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (sc_bridge.ScSessionExpiredError("sc session expired (no_session) — run interactive `sc login`"), "sc login"),
+        (sc_bridge.ScReloginRequiredError("sc session expired (REFRESH_RELOGIN_REQUIRED) — run interactive `sc login`"), "sc login"),
+        (sc_bridge.ScSecretStorageError("sc secret storage unavailable (secret_storage_unavailable) — check system/keyring configuration"), "Secret Storage"),
+    ],
+)
+def test_sc_auth_error_alert_is_action_oriented(exc, expected, monkeypatch, tmp_path, portfolio, transactions):
+    """Differenzierte sc-Auth-Fehler -> handlungsorientierter Alert mit Aktion (Exit 1, kein Versand)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    def _raise_auth_error():
+        raise exc
+
+    monkeypatch.setattr(sc_bridge, "refresh_from_sc", _raise_auth_error)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert expected in sent[0][0]
+    assert "token" not in sent[0][0] and "password" not in sent[0][0]
 
 
 def test_dry_run_error_sends_no_telegram_alert(monkeypatch, tmp_path, portfolio, transactions):

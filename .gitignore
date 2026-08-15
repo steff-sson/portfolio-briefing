@@ -9,6 +9,7 @@ config/strategy.yaml
 config/pipeline.yaml
 config/snapshots/
 config/snapshot.current.json
+config/snapshot.staged.json
 *.egg-info/
 .pytest_cache/
 .mypy_cache/

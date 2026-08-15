@@ -42,9 +42,6 @@ _RECOMMENDATION_TERMS = (
     "verkauf sie",
 )
 
-# Toleranz in Prozentpunkten gegen deterministic_summary (Plan §4.2).
-NUMBER_TOLERANCE_PP = 0.5
-
 # Prozent-Grenzwerte aus facts.strategy_thresholds_pct, die das LLM
 # referenzieren darf (z.B. "Core-Ziel 75%") — bereits in Prozent.
 _STRATEGY_THRESHOLD_KEYS = (
@@ -98,8 +95,13 @@ def _finding(severity: str, issue: str, evidence: str, correction: str) -> dict:
 
 
 def _extract_numbers(text: str) -> list[float]:
-    matches = re.findall(r"(\d+\.?\d*)\s*%", text)
-    return [float(m) for m in matches]
+    """Alle Prozentzahlen im Text (Punkt ODER Komma als Dezimaltrenner).
+
+    Post-Live-Fix P0.3: Komma-Dezimalen (z.B. "24,8%") werden mitgeprueft,
+    statt die Zahlen-Pruefung zu umgehen. Als float normalisiert.
+    """
+    matches = re.findall(r"(\d+(?:[.,]\d+)?)\s*%", text)
+    return [float(m.replace(",", ".")) for m in matches]
 
 
 def _extract_tickers(text: str) -> set[str]:
@@ -284,6 +286,24 @@ def _find_option_terms(section_content: str) -> list[str]:
     return found
 
 
+def _paragraphs(content: str) -> list[str]:
+    """Sektionsinhalt in Absaetze teilen (durch Leerzeilen getrennt).
+
+    Basis der Pro-Option-Pruefung (Post-Live-Fix P0.3): Begruendung und
+    Gegenargument muessen im selben Absatz wie die Option stehen — ein
+    Marker an anderer Stelle der Sektion zaehlt nicht fuer diese Option.
+    """
+    return [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
+
+
+def _has_marker(content: str, markers: tuple[str, ...]) -> bool:
+    """Mindestens ein Marker (Wortgrenze, case-insensitive) im Text."""
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", content, re.IGNORECASE)
+        for marker in markers
+    )
+
+
 def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     """Stage-3 gate: deterministic draft checks against the facts package.
 
@@ -366,17 +386,22 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
             )
         )
 
-    # 4. Zahlen nur aus deterministic_summary + strategy_thresholds_pct (Toleranz ±0.5pp)
+    # 4. Zahlen nur aus deterministic_summary + strategy_thresholds_pct
+    #    (Post-Live-Fix P0.3: 1:1-Match auf 1 Dezimalstelle — identisch zur
+    #    ZULÄSSIGE-ZAHLEN-Liste im Draft-Prompt. Eine fruehere ±0.5pp-Toleranz
+    #    liess abweichende Werte durch; abweichende Zahlen blocken jetzt
+    #    critical, egal wie nah sie an einem erlaubten Wert liegen).
     thresholds = facts_package.get("strategy_thresholds_pct", {})
     allowed = _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
+    allowed_formatted = sorted({f"{value:.1f}" for value in allowed})
     for num in _extract_numbers(text):
-        if not any(abs(num - value) <= NUMBER_TOLERANCE_PP for value in allowed):
+        if f"{num:.1f}" not in allowed_formatted:
             findings.append(
                 _finding(
                     "critical",
-                    f"Zahl {num}% passt nicht zu deterministic_summary",
-                    f"Draft nennt {num}%, erlaubt: {allowed}",
-                    "Zahl aus deterministic_summary uebernehmen oder entfernen",
+                    f"Zahl {num}% passt nicht 1:1 zu deterministic_summary",
+                    f"Draft nennt {num}%, erlaubt (1:1): {', '.join(allowed_formatted)}",
+                    "Zahl unveraendert (identischer Wert und Schreibweise, 1 Dezimalstelle) aus der ZULÄSSIGE-ZAHLEN-Liste uebernehmen oder entfernen",
                 )
             )
 
@@ -418,22 +443,16 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
             )
         )
 
-    # 7. Optionen-Contract (Plan Phase 2.4/2.8): Optionen nur bei
-    #    deterministischen Triggern, pro Option Begruendung + Gegenargument/
-    #    Risiko; imperative Kauf-/Verkaufsanweisung bleibt critical; sonstige
-    #    Empfehlungen ausserhalb der Optionen-Sektion bleiben critical.
+    # 7. Optionen-Contract (Plan Phase 2.4/2.8 + Post-Live-Fix P0.3):
+    #    Optionen nur bei deterministischen Triggern; pro Option(s-Block)
+    #    Begruendung + Gegenargument/Risiko im SELBEN Absatz (Blank-Zeile-
+    #    getrennt) — ein Marker einer anderen Option zaehlt nicht; imperative
+    #    Kauf-/Verkaufsanweisung bleibt critical; sonstige Empfehlungen
+    #    ausserhalb der Optionen-Sektion bleiben critical.
     triggers = compute_triggers(facts_package)
     options_section = _extract_section(text, _OPTIONS_SECTION)
     options_content = _section_content(options_section) or ""
     option_terms = _find_option_terms(options_content)
-    has_reason = any(
-        re.search(rf"\b{re.escape(marker)}\b", options_content, re.IGNORECASE)
-        for marker in _REASON_MARKERS
-    )
-    has_counter = any(
-        re.search(rf"\b{re.escape(marker)}\b", options_content, re.IGNORECASE)
-        for marker in _COUNTER_MARKERS
-    )
     if option_terms and not triggers["has_any_trigger"]:
         findings.append(
             _finding(
@@ -443,24 +462,28 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 "Optionen nur bei Triggern generieren oder Sektion auf 'keine entscheidungsrelevanten Punkte' setzen",
             )
         )
-    if option_terms and not has_reason:
-        findings.append(
-            _finding(
-                "major",
-                "Option ohne Begründung",
-                f"Optionen {', '.join(option_terms)} ohne Begründung in '{_OPTIONS_SECTION}'",
-                "Pro Option eine Begründung (Evidenz aus dem Faktenpaket) ergänzen",
+    for paragraph in _paragraphs(options_content):
+        terms = _find_option_terms(paragraph)
+        if not terms:
+            continue
+        if not _has_marker(paragraph, _REASON_MARKERS):
+            findings.append(
+                _finding(
+                    "major",
+                    "Option ohne Begründung",
+                    f"Options-Block {', '.join(terms)} ohne Begründung im Absatz",
+                    "Pro Option eine Begründung (Evidenz aus dem Faktenpaket) im selben Block ergänzen",
+                )
             )
-        )
-    if option_terms and not has_counter:
-        findings.append(
-            _finding(
-                "major",
-                "Option ohne Gegenargument/Risiko",
-                f"Optionen {', '.join(option_terms)} ohne Gegenargument/Risiko in '{_OPTIONS_SECTION}'",
-                "Pro Option ein konkretes Gegenargument/Risiko ergänzen",
+        if not _has_marker(paragraph, _COUNTER_MARKERS):
+            findings.append(
+                _finding(
+                    "major",
+                    "Option ohne Gegenargument/Risiko",
+                    f"Options-Block {', '.join(terms)} ohne Gegenargument/Risiko im Absatz",
+                    "Pro Option ein konkretes Gegenargument/Risiko im selben Block ergänzen",
+                )
             )
-        )
     # Imperative Kauf-/Verkaufsanweisung — critical, auch innerhalb der Sektion.
     for term in _IMPERATIVE_TERMS:
         if re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE):

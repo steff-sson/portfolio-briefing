@@ -111,6 +111,21 @@ def test_revise_prompt_contains_stil_rules():
     assert "Anlageempfehlungen" in content
 
 
+def test_revise_prompt_enforces_verbatim_numbers_and_option_blocks():
+    """Post-Live-Fix P0.3: Zahlen 1:1 mit identischer Schreibweise aus
+    deterministic_summary/strategy_thresholds_pct, Optionen nur als eigener
+    Block mit Begründung + Gegenargument (andere Option zählt nicht)."""
+    content = llm_revise.REVISE_PROMPT_PATH.read_text(encoding="utf-8")
+    assert "1:1" in content
+    assert "identischer Wert" in content
+    assert "identische Schreibweise" in content
+    assert "1 Dezimalstelle" in content
+    assert "Einzel-Positionsgewichte" in content
+    assert "eigener Block" in content
+    assert "Begründung und Gegenargument einer anderen Option" in content
+    assert "Option: halten | reduzieren | aufstocken" in content
+
+
 def test_empty_response_raises_llm_error():
     client = _FakeClient(content=None)
     with pytest.raises(llm_revise.LLMError, match="leere Antwort"):

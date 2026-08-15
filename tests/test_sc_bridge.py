@@ -177,6 +177,72 @@ def test_refresh_wrapper_empty_holdings_raises(monkeypatch, wrapper_transactions
         sc_bridge.refresh_from_sc()
 
 
+# --- Differenzierte Auth-Fehler (no_session / REFRESH_RELOGIN_REQUIRED / secret_storage_unavailable) ---
+
+
+def _run_fails_with_stderr(stderr: str):
+    """Mock fuer subprocess.run: non-zero Exit mit stderr-Marker (Auth-Fehler)."""
+
+    def _run(cmd, *args, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr=stderr)
+
+    return _run
+
+
+@pytest.mark.parametrize(
+    ("marker", "exc_cls"),
+    [
+        ("no_session", sc_bridge.ScSessionExpiredError),
+        ("REFRESH_RELOGIN_REQUIRED", sc_bridge.ScReloginRequiredError),
+        ("secret_storage_unavailable", sc_bridge.ScSecretStorageError),
+    ],
+)
+def test_refresh_from_sc_auth_error_in_stderr_raises_specific(monkeypatch, marker, exc_cls):
+    """Auth-Marker in stderr -> spezifische Exception statt generischem ScCommandError."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    stderr = json.dumps({"ok": False, "error": {"code": marker, "message": "msg"}})
+    monkeypatch.setattr(sc_bridge.subprocess, "run", _run_fails_with_stderr(stderr))
+
+    with pytest.raises(exc_cls):
+        sc_bridge.refresh_from_sc()
+
+
+@pytest.mark.parametrize(
+    ("code", "exc_cls"),
+    [
+        ("no_session", sc_bridge.ScSessionExpiredError),
+        ("REFRESH_RELOGIN_REQUIRED", sc_bridge.ScReloginRequiredError),
+        ("secret_storage_unavailable", sc_bridge.ScSecretStorageError),
+    ],
+)
+def test_refresh_from_sc_wrapper_ok_false_auth_code_raises_specific(monkeypatch, transactions, code, exc_cls):
+    """Wrapper-Format mit ok=false + error.code-Auth-Marker -> spezifische Exception."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    payload = {"ok": False, "command": "sc broker holdings --json", "error": {"code": code, "message": "..."}}
+    run, _ = _make_run(json.dumps(payload), json.dumps(transactions))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    with pytest.raises(exc_cls):
+        sc_bridge.refresh_from_sc()
+
+
+def test_auth_error_classes_are_sc_bridge_errors():
+    """Alle Auth-Fehlerklassen sind ScBridgeError-Subklassen (fail-closed kompatibel)."""
+    for cls in (sc_bridge.ScSessionExpiredError, sc_bridge.ScReloginRequiredError, sc_bridge.ScSecretStorageError):
+        assert issubclass(cls, sc_bridge.ScBridgeError)
+
+
+def test_auth_error_message_is_action_oriented_and_secret_free():
+    """Alert-Messages nennen die Aktion (`sc login`) und keine Secrets/User-Daten."""
+    for exc in (
+        sc_bridge.ScSessionExpiredError("sc session expired (no_session) — run interactive `sc login`"),
+        sc_bridge.ScReloginRequiredError("sc session expired (REFRESH_RELOGIN_REQUIRED) — run interactive `sc login`"),
+        sc_bridge.ScSecretStorageError("sc secret storage unavailable (secret_storage_unavailable) — check system/keyring configuration"),
+    ):
+        for forbidden in ("token", "password", "email", "session.json"):
+            assert forbidden not in str(exc)
+
+
 # --- update_config: kein Mock-Fallback, kein Schreiben im Fehlerfall ---
 
 

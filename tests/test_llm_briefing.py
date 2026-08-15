@@ -434,6 +434,22 @@ def test_mode_prompts_include_changes_placeholder():
         assert "Veränderungen ({changes})" in content
 
 
+def test_mode_prompts_enforce_verbatim_numbers_and_option_blocks():
+    """Post-Live-Fix P0.3: Zahlen 1:1 mit identischer Schreibweise aus der
+    ZULÄSSIGE-ZAHLEN-Liste (kein Ableiten/Runden/Positionsgewichte), Optionen
+    nur als eigener Block mit Begründung + Gegenargument (andere Option
+    zählt nicht)."""
+    for mode in ("monday", "friday", "monthly"):
+        content = (llm_briefing.PROMPTS_DIR / f"{mode}.txt").read_text(encoding="utf-8")
+        assert "identischer Wert" in content
+        assert "identische Schreibweise" in content
+        assert "1 Dezimalstelle" in content
+        assert "Einzel-Positionsgewichte" in content
+        assert "eigener Block" in content
+        assert "Begründung und Gegenargument einer anderen Option" in content
+        assert "Option: halten | reduzieren | aufstocken" in content
+
+
 def test_load_prompt_serializes_changes():
     """_load_prompt serialisiert {changes} (reduziertes Diff) in alle Mode-Prompts."""
     context = {

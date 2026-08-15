@@ -19,7 +19,7 @@ AUFGABE — Wochenabschluss:
 
 REGELN:
 - Optionen (halten/reduzieren/aufstocken) NUR bei Triggern (siehe OPTIONEN-REGEL).
-- Zahlen NUR aus den Daten oben, nie erfinden.
+- Zahlen NUR 1:1 aus deterministic_summary (ZULÄSSIGE ZAHLEN-Liste), nie erfinden oder ableiten.
 - DATENQUALITÄT VORRANG: Ist der Datenqualitäts-Status nicht "ok", KEINE Optionen generieren — das Datenqualitäts-Problem benennen statt Grenzverletzungen zu bewerten.
 - STATUS-REGELN: "Ruhige Woche"/"Alle Grenzen eingehalten" NUR in der KURZLAGE und NUR wenn weder rote noch gelbe Punkte gelistet sind; sonst die betroffenen Punkte namentlich benennen. "Kein Handlungsbedarf" NUR wenn keiner der Optionen-Trigger vorliegt.
 
@@ -46,15 +46,15 @@ OPTIONEN-REGEL (zwingend):
   c) thesis-relevante News vorhanden
   d) strategy_changed == true (Strategieänderung)
 - Wenn keiner dieser Trigger vorliegt: Sektion "keine entscheidungsrelevanten Punkte".
-- Pro Option zwingend:
-  - Option (halten/reduzieren/aufstocken)
-  - Begründung (Evidenz aus Faktenpaket, Zahl aus deterministic_summary)
-  - Gegenargument/Risiko (konkret, nicht pauschal)
+- Jede Option als eigener Block mit genau diesen drei Feldern (Begründung und Gegenargument einer anderen Option zählen NICHT):
+  - Option: halten | reduzieren | aufstocken
+  - Begründung: konkrete Evidenz aus dem Faktenpaket (Zahl 1:1 aus der ZULÄSSIGE ZAHLEN-Liste oder benannter Fakt aus {changes}/{news})
+  - Gegenargument/Risiko: konkretes Risiko der gewählten Option, nicht pauschal
 - Keine finale Empfehlung ("kaufen Sie"). Optionen-Raum aufspannen, nicht entscheiden.
 - Keine Option ohne Begründung und ohne Gegenargument.
 
 REGELN:
-- Zahlen NUR aus "deterministic_summary" im Faktenpaket. Prozentwerte NUR 1:1 aus der "ZULÄSSIGE ZAHLEN"-Liste übernehmen — nie ableiten, konvertieren (z.B. Dezimalwert in %), runden oder neu berechnen.
+- Zahlen NUR aus "deterministic_summary" im Faktenpaket. Prozentwerte NUR 1:1 aus der "ZULÄSSIGE ZAHLEN"-Liste übernehmen — identischer Wert UND identische Schreibweise (1 Dezimalstelle mit Punkt, z.B. "24.8%"); nie ableiten, konvertieren (z.B. Dezimalwert in %), runden, neu berechnen oder Einzel-Positionsgewichte nennen (stehen NICHT im Faktenpaket). Nicht-Prozent-Zahlen (z.B. Positionsanzahl) ebenfalls nur aus deterministic_summary.
 - Leere Listen (rot/gelb/grün, Thesen) als "keine" benennen. Niemals "0%" oder "0 Punkte" aus einer leeren Liste ableiten.
 - Ticker/ISIN NUR aus dem Portfolio im Faktenpaket.
 - STATUS-REGELN (zwingend):

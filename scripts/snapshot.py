@@ -6,6 +6,8 @@ Keine Secrets: es wird nie Snapshot-Inhalt geloggt, nur Dateipfade/Boolesches.
 
 Layout:
 - ``config/snapshot.current.json`` — Rolling-Stand (neuester Snapshot)
+- ``config/snapshot.staged.json`` — pending Live-Stand (nur staged, Baseline
+  bleibt unangetastet; erst ``promote_staged`` nach erfolgreichem final_gate)
 - ``config/snapshots/archive/snapshot-<ts>.json`` — historische Snapshots
 
 Schreibweise: temporaere Datei im Zielverzeichnis + ``os.replace`` (atomar);
@@ -27,6 +29,7 @@ SCHEMA_VERSION = 1
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 CURRENT_PATH = CONFIG_DIR / "snapshot.current.json"
+STAGED_PATH = CONFIG_DIR / "snapshot.staged.json"
 ARCHIVE_DIR = CONFIG_DIR / "snapshots" / "archive"
 
 _ARCHIVE_PREFIX = "snapshot-"
@@ -196,6 +199,74 @@ def capture(
         "previous": previous,
         "archive_path": str(archive_path) if archive_path else None,
     }
+
+
+def capture_staged(
+    portfolio: dict,
+    transactions: list,
+    mode: str | None = None,
+    sc_meta: dict | None = None,
+    captured_at: str | None = None,
+    strategy: dict | None = None,
+) -> dict:
+    """Live-Stand erfassen, aber NUR staged: die Baseline bleibt unangetastet.
+
+    Schreibt nach ``config/snapshot.staged.json`` (atomar, gitignored) und
+    archiviert keinen Vorgaenger. Erst ein erfolgreicher Lauf (final_gate
+    bestanden + Render ok) promoted den staged Stand via ``promote_staged``;
+    jeder Fehlerpfad verwirft ihn via ``discard_staged``.
+    Rueckgabe: ``{"snapshot", "staged_path"}``.
+    """
+    snapshot_dict = build_snapshot(
+        portfolio,
+        transactions,
+        mode=mode,
+        sc_meta=sc_meta,
+        captured_at=captured_at,
+        strategy=strategy,
+    )
+    staged_path = _write_atomic(STAGED_PATH, snapshot_dict)
+    return {"snapshot": snapshot_dict, "staged_path": str(staged_path)}
+
+
+def promote_staged() -> dict | None:
+    """Staged-Snapshot zur neuen Baseline machen (Vorgaenger archivieren).
+
+    Liest ``config/snapshot.staged.json``, archiviert den aktuellen Stand
+    (Vorgaenger), schreibt staged -> current (atomar) und loescht staged.
+    Kein staged (fehlend/korrupt) -> None, kein Schreiben.
+    Rueckgabe: ``{"snapshot", "previous", "archive_path"}`` oder None.
+    """
+    staged = read_snapshot(STAGED_PATH)
+    if staged is None:
+        return None
+    previous = read_snapshot(CURRENT_PATH)
+    archive_path = archive_previous(previous) if previous is not None else None
+    _write_atomic(CURRENT_PATH, staged)
+    try:
+        STAGED_PATH.unlink()
+    except OSError:
+        pass
+    return {
+        "snapshot": staged,
+        "previous": previous,
+        "archive_path": str(archive_path) if archive_path else None,
+    }
+
+
+def discard_staged() -> bool:
+    """Staged-Snapshot verwerfen (Fehlerpfad): Baseline bleibt unangetastet.
+
+    Loescht ``config/snapshot.staged.json`` falls vorhanden.
+    Rueckgabe: True wenn geloescht, False wenn nicht vorhanden/nicht loeschbar.
+    """
+    try:
+        STAGED_PATH.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True
 
 
 if __name__ == "__main__":

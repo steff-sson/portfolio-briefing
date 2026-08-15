@@ -31,13 +31,26 @@ python3 -m venv .venv
 
 Für echte Daten muss `sc login` ausgeführt sein. Produktiver Lauf ist fail-closed ohne Mock-Fallback; der erste Lauf erzeugt den ersten Snapshot (Seed-Migration). Seed-Dateien `config/portfolio.json`/`config/transactions.json` sind entfernt.
 
+## sc-Session-Betrieb
+
+Session-Lifecycle des scalable.capital-CLI — offiziell bestätigt durch den Maintainer ([Issue #5](https://github.com/ScalableCapital/scalable-cli/issues/5), [Repo](https://github.com/ScalableCapital/scalable-cli)):
+
+- **Refresh-Token-Lebensdauer:** bis zu 7 Tage — danach ist immer ein neues interaktives `sc login` erforderlich.
+- **Idle-Timeout:** 24h ohne Nutzung — die Session verfällt nach einem Tag Inaktivität.
+- **Automatischer Refresh:** das CLI refresht die Session bei jeder Nutzung automatisch; bei Nutzung mind. 1×/24h bleibt sie bis zu 7 Tage aktiv.
+- **Login ist interaktiv (OAuth-Device-Flow):** human-oriented — es gibt **keinen dokumentierten non-interactive-/Cron-Login**. `sc login` wird ausschließlich vom User ausgeführt, nie von der Pipeline/Automation.
+- **Auth-Check:** `sc whoami --json` ist der de-facto Auth-Check (kein dedizierter `sc health`-Befehl). `healthcheck.py` führt ihn aus und hält die Session damit aktiv.
+- **Fehlerklassen:** `no_session` / `REFRESH_RELOGIN_REQUIRED` → `sc login` erforderlich; `secret_storage_unavailable` → System-/Keyring-Prüfung. `healthcheck.py` differenziert die Status; `sc_bridge.refresh_from_sc` wirft dafür spezifische Exceptions (handlungsorientierte Alerts).
+- **`session_backend=file`:** wird von diesem Projekt nur dokumentierend geprüft, **niemals automatisch überschrieben** (keine Änderung der sc-Konfiguration).
+
 ## Cron-Setup (offener Schritt — noch nicht aktiviert)
 
 ```bash
 0 8 * * 1 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monday
 0 18 * * 5 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py friday
 30 8 1 * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monthly
-*/30 * * * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/healthcheck.py
+# Healthcheck 1× täglich 06:00 — hält sc-Session aktiv (sc whoami --json), vor Montag-Lauf 08:00
+0 6 * * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/healthcheck.py
 ```
 
 ## Testlauf (Mock-only, ohne API-Calls)

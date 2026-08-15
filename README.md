@@ -39,6 +39,17 @@ snapshot.load_previous() → sc_bridge.refresh_from_sc() → snapshot.capture() 
 - **Mock nur im Dry-Run:** `sc_bridge.load_mock()` (`tests/mock_data/`), explizit, nirgends automatisch.
 - Frühere Seed-Dateien `config/portfolio.json`/`config/transactions.json` sind entfernt (gitignored); der erste produktive Lauf erzeugt den ersten Snapshot.
 
+### sc-Session-Lifecycle (belegte Grenzen)
+
+Offiziell bestätigt durch den scalable-cli Maintainer ([Issue #5](https://github.com/ScalableCapital/scalable-cli/issues/5), [Repo](https://github.com/ScalableCapital/scalable-cli)):
+
+- **Refresh-Token:** bis zu 7 Tage Lebensdauer.
+- **Idle-Timeout:** 24h ohne Nutzung.
+- Das CLI refresht die Session bei Nutzung automatisch — bei Nutzung mind. 1×/24h bleibt sie bis zu 7 Tage aktiv; danach ist ein **neues interaktives `sc login`** erforderlich.
+- Login ist human-oriented (OAuth-Device-Flow): **kein dokumentierter non-interactive-/Cron-Login** — die Pipeline führt `sc login` nie selbst aus.
+- **Auth-Check:** `sc whoami --json` (de-facto, kein `sc health`). `healthcheck.py` nutzt ihn als Keepalive und erkennt `no_session`, `REFRESH_RELOGIN_REQUIRED` und `secret_storage_unavailable` differenziert (handlungsorientierte Alerts).
+- `session_backend=file`: wird nur dokumentierend geprüft, **nie automatisch überschrieben**.
+
 ## Config/Secrets
 
 Nicht-sensitive Pipeline-Defaults: `config/pipeline.example.yaml` (nur dokumentierend, wird nicht geladen). Anlagestrategie: `config/strategy.yaml` (gitignored, read-only Input, Vorlage `config/strategy.example.yaml`) — technische Schnittstelle (Schema, Validierung, Hash/Diff, Initiallauf): `docs/strategy.md`.
@@ -61,7 +72,7 @@ TELEGRAM_CHAT_ID=...
 
 ## Erstlauf / Seed-Migration (offene Schritte)
 
-1. `sc login` ausführen.
+1. `sc login` ausführen (interaktiv, OAuth-Device-Flow — kein non-interactive-/Cron-Login; siehe Session-Lifecycle oben).
 2. Ersten produktiven Lauf starten (`.venv/bin/python scripts/run_briefing.py monday`), damit `config/snapshot.current.json` entsteht (Seed-Migration).
 3. Cron-Jobs unten sind noch nicht aktiviert (offener Schritt).
 
@@ -78,13 +89,15 @@ Jeder Fehler (API-Key fehlt, API-Error, leere LLM-Antwort, ungültiges Review-JS
 0 18 * * 5 /home/stef/github/portfolio-briefing/.venv/bin/python /home/stef/github/portfolio-briefing/scripts/run_briefing.py friday
 # Monatlich 1. 08:30
 30 8 1 * * /home/stef/github/portfolio-briefing/.venv/bin/python /home/stef/github/portfolio-briefing/scripts/run_briefing.py monthly
-# Healthcheck (ohne Live-Abfrage)
-*/30 * * * * /home/stef/github/portfolio-briefing/.venv/bin/python /home/stef/github/portfolio-briefing/scripts/healthcheck.py
+# Healthcheck 1× täglich 06:00 — hält sc-Session aktiv (sc whoami --json), vor Montag-Lauf 08:00
+0 6 * * * /home/stef/github/portfolio-briefing/.venv/bin/python /home/stef/github/portfolio-briefing/scripts/healthcheck.py
 ```
+
+> Healthcheck hält die sc-Session aktiv durch `sc whoami --json` (Idle-Timeout 24h, Refresh-Token bis zu 7 Tage — danach interaktives `sc login`, siehe [sc-Session-Lifecycle](#sc-session-lifecycle-belegte-grenzen)).
 
 ## Bekannte Grenzen
 
 - Kein Phase-5-plus: Revise-Loop ist auf genau 1 Revision begrenzt; bleibt das Review `revise`, blockt das Gate (kein zweiter Versuch, kein „force send").
 - `verify` prüft Zahlen/Ticker/ISIN deterministisch gegen das Faktenpaket — stilistische oder semantische Qualität beurteilt nur das GLM-Review.
 - LLM-Ausfälle sind fail-closed: ein partiell fehlgeschlagener Lauf erzeugt keinen Teildraft im Vault, sondern nur einen Alert.
-- `healthcheck.py` und `check_position.py` sind separate Werkzeuge (nicht Teil der Briefing-Pipeline): live-first, keine automatischen `sc`-/API-Calls, kein Mock-Fallback. `check_position.py` liest das Portfolio aus dem Live-Snapshot; `healthcheck.py` meldet fehlende Live-Config als roten Status.
+- `healthcheck.py` und `check_position.py` sind separate Werkzeuge (nicht Teil der Briefing-Pipeline): kein Mock-Fallback. `check_position.py` liest das Portfolio aus dem Live-Snapshot; `healthcheck.py` meldet fehlende Live-Config als roten Status und prüft die sc-Session per `sc whoami --json` (Auth-Probe/Keepalive, kein Broker-Datenabruf, keine Secrets im Alert).
