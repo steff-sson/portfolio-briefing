@@ -15,6 +15,12 @@ from dotenv import load_dotenv
 ENV_PATH = Path.home() / ".config" / "automation" / "config.env"
 VAULT_DIR = Path.home() / "docs" / "notizen" / "portfolio-briefings"
 TELEGRAM_MAX_LEN = 4096
+RETAINED_BRIEFINGS = 4
+
+# Exakte Briefing-Dateinamen (echte Briefings). Nur diese zaehlen fuer die
+# Retention: Dry-Run-Dateien (*-dryrun.md), Healthchecks und andere Dateien
+# bleiben unangetastet.
+_BRIEFING_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?:monday|friday|monthly)\.md$")
 
 # Legacy-Markdown nur fuer echte Briefings. Alerts/Healthchecks werden als
 # Plain-Text gesendet: Telegram-Markdown-Fehler (400) duerfen keinen Alert blocken.
@@ -105,6 +111,26 @@ def _archive(markdown: str, mode: str) -> Path:
     path = VAULT_DIR / f"{date}-{mode}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
+
+
+def _retain_briefings(keep: int = RETAINED_BRIEFINGS) -> list[Path]:
+    """Loescht aeltere Briefings, so dass nur die `keep` neuesten bleiben.
+
+    Nur Dateien mit exaktem Briefing-Namen (``YYYY-MM-DD-monday.md``,
+    ``YYYY-MM-DD-friday.md``, ``YYYY-MM-DD-monthly.md``) zaehlen. Andere
+    Dateien (``*-dryrun.md``, Healthchecks, Readmes ...) bleiben erhalten.
+    Zurueckgegeben werden die geloeschten Dateien (Testbarkeit).
+    """
+    VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    briefing_files = sorted(
+        (p for p in VAULT_DIR.iterdir() if p.is_file() and _BRIEFING_FILE_RE.match(p.name)),
+        key=lambda p: p.name,
+    )
+    removed: list[Path] = []
+    for path in briefing_files[:-keep] if keep > 0 else briefing_files:
+        path.unlink()
+        removed.append(path)
+    return removed
 
 
 def _send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None) -> bool:
@@ -215,6 +241,9 @@ def send_briefing(markdown: str, mode: str) -> bool:
     archived: Path | None = None
     if mode != "alert":
         archived = _archive(markdown, mode)
+        # Retention: nach erfolgreichem Archivieren nur die 4 neuesten
+        # echten Briefings behalten. Dry-Run-Dateien/Healthchecks bleiben.
+        _retain_briefings()
 
     if not token or not chat_id:
         print(f"Telegram skipped; archived to {archived}")

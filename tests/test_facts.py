@@ -37,12 +37,20 @@ def test_full_package_from_mock_data(portfolio, transactions):
 
     assert set(package) == {
         "meta", "portfolio", "analysis", "news", "strategy", "transactions", "changes",
-        "data_quality", "strategy_diff", "triggers",
+        "data_quality", "strategy_diff", "triggers", "watchlist",
         "deterministic_summary", "strategy_thresholds_pct",
     }
     assert set(package["meta"]) == {"mode", "generated_at", "pipeline_version"}
     assert package["meta"]["mode"] == "monday"
     assert package["meta"]["pipeline_version"] == "2.0"
+
+    # Briefing-Schnittstelle (Plan §6a): Ampel (7 Kategorien), Empfehlung,
+    # Positionsvorschlaege — deterministisch aus analyze abgeleitet.
+    summary = package["deterministic_summary"]
+    assert set(summary["traffic_lights"]) == set(analyze.TRAFFIC_LIGHT_CATEGORIES)
+    assert summary["recommendation"]["label"] in ("BUY", "SELL", "WATCH")
+    assert isinstance(summary["position_actions"], list)
+    assert len(summary["position_actions"]) <= 3
 
     # Durchgereichte Daten unveraendert (identische Objekte); changes fehlt -> None
     assert package["portfolio"] is portfolio
@@ -51,6 +59,10 @@ def test_full_package_from_mock_data(portfolio, transactions):
     assert package["transactions"] is transactions
     assert package["news"] == []
     assert package["changes"] is None
+    assert package["watchlist"] == []  # ohne watchlist-Argument -> leere Watchlist
+    # Watchlist-/Satellite-Signale ohne Watchlist-Daten: leere Listen (kein Crash)
+    assert package["deterministic_summary"]["watchlist_signals"] == []
+    assert package["deterministic_summary"]["satellite_sell_signals"] == []
     # Neue deterministische Felder: data_quality/strategy_diff None ohne Eingabe,
     # triggers deterministisch berechnet
     assert package["data_quality"] is None
@@ -85,13 +97,15 @@ def test_full_package_from_mock_data(portfolio, transactions):
     assert summary["turnover_ratio"] == analysis["checks"]["turnover"]["turnover_ratio"]
     assert summary["outdated_theses"] == analysis["checks"]["thesis_deadlines"]["outdated"]
 
-    # Status-Listen decken genau die Checks mit Status ab (positions hat keinen)
-    for name, check in analysis["checks"].items():
-        if name == "positions":
-            continue
+    # Status-Listen decken die 6 klassischen Status-Checks ab (Plan §6a: die
+    # 7. Kategorie trades_per_quarter lebt in traffic_lights, nicht in den
+    # red/yellow/green-Listen der bestehenden Struktur).
+    for name in facts._STATUS_CHECKS:
+        check = analysis["checks"][name]
         bucket = {"red": summary["red_checks"], "yellow": summary["yellow_checks"], "green": summary["green_checks"]}[check["status"]]
         assert name in bucket
-    assert len(summary["red_checks"]) + len(summary["yellow_checks"]) + len(summary["green_checks"]) == 6
+    assert len(summary["red_checks"]) + len(summary["yellow_checks"]) + len(summary["green_checks"]) == len(facts._STATUS_CHECKS)
+    assert "trades_per_quarter" in summary["traffic_lights"]
 
 
 def test_empty_news(portfolio, transactions):
@@ -107,6 +121,8 @@ def test_empty_news(portfolio, transactions):
         "max_sector", "max_sector_ratio", "drift", "turnover_ratio", "outdated_theses",
         "red_checks", "yellow_checks", "green_checks",
         "data_quality_status", "data_quality_issues", "has_triggers",
+        "traffic_lights", "recommendation", "position_actions",
+        "position_perf_6m", "watchlist_signals", "satellite_sell_signals",
     }
 
 
@@ -480,3 +496,203 @@ def test_compute_triggers_data_quality_ok_is_not_a_trigger():
     result = facts.compute_triggers(pkg)
     assert "data_quality" not in result["ordered"]
     assert result["ordered"] == ["boundary_violation"]
+
+
+# --- Phase 5b: Watchlist-/Satellite-Signale im Faktenpaket -------------------
+#
+# facts.build_facts_package bindet das deterministische Signalmodell
+# (analyze.compute_watchlist_signals) ein: summary["watchlist_signals"] und
+# summary["satellite_sell_signals"]. Keine neue Signal-Logik hier — nur die
+# Einbindung, die Ausschlussregeln (Core-ETFs/SUSE-Legacy) und der
+# Fundamentaldaten-Disclaimer (fundamentals_used: false) werden getestet.
+
+_SIGNAL_STRATEGY = {
+    "portfolio": {
+        "core_pct": 80.0,
+        "satellite_pct": 20.0,
+        "rebalancing": {"threshold_pct": 5.0},
+    },
+    "satellite_limits": {
+        "target_position_pct": 5.0,
+        "max_position_pct": 10.0,
+        "max_sector_pct": 20.0,
+        "max_turnover_annual_pct": 30.0,
+    },
+    "sectors": {"preferred": ["technology", "ai", "energy"], "excluded": ["fossil_fuels", "defense"]},
+}
+
+_SIGNAL_PORTFOLIO = {
+    "total_value_eur": 20000.0,
+    "holdings": [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "category": "core", "value_eur": 16000.0},
+        {"isin": "US88579Y1010", "name": "3M Co.", "category": "satellite", "value_eur": 1000.0, "sector": "industrials"},
+    ],
+}
+
+_SIGNAL_ANALYSIS = {
+    "checks": {
+        "positions": {
+            "positions": [
+                {"isin": "US88579Y1010", "name": "3M Co.", "category": "satellite", "value_eur": 1000.0, "weight": 0.05},
+            ],
+        },
+        "sector_concentration": {},
+        "single_position": {},
+    },
+}
+
+
+def _signal_watchlist() -> list:
+    """Watchlist: NVIDIA (BUY-Kandidat), 3M (SELL-Kandidat, gehalten),
+    Vanguard Core-ETF (Ausschluss) und SUSE (Legacy-Ausschluss)."""
+    return [
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "sector": "technology", "value_eur": 500.0},
+        {"isin": "US88579Y1010", "name": "3M Co.", "category": "satellite", "sector": "industrials", "value_eur": 1000.0},
+        {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World UCITS ETF", "category": "core", "sector": "Diversified"},
+        {"isin": "LU2722255754", "name": "SUSE", "category": "unknown", "sector": "software"},
+    ]
+
+
+def _signal_news() -> list:
+    return [
+        {"title": "NVIDIA meldet Rekord-Gewinn und starkes Wachstum", "summary": "", "source": "test"},
+        {"title": "MMM (3M Co.) verliert weiter — Absturz und Verlustwarnung", "summary": "", "source": "test"},
+    ]
+
+
+def test_watchlist_signals_bound_into_summary():
+    """Phase 5b: Signalmodell wird eingebunden — summary traegt beide Listen.
+
+    NVIDIA (praeferierter Sektor + positive News) -> BUY in der Watchlist;
+    3M (bestehende Satellite-Holding, negative News) -> SELL, und zwar in
+    beiden Sektionen (Watchlist-Auswahl + Sell-/Reduce-Sektion).
+    """
+    package = facts.build_facts_package(
+        _SIGNAL_PORTFOLIO,
+        [],
+        _SIGNAL_ANALYSIS,
+        _signal_news(),
+        _SIGNAL_STRATEGY,
+        mode="monday",
+        watchlist=_signal_watchlist(),
+    )
+    summary = package["deterministic_summary"]
+    assert package["watchlist"] == _signal_watchlist()  # unveraendert durchgereicht
+
+    buy = next(s for s in summary["watchlist_signals"] if s["isin"] == "US5949724083")
+    assert buy["signal"] == "BUY"
+    assert buy["score"] >= 3
+    assert buy["fundamentals_used"] is False  # Fundamentaldaten-Disclaimer erhalten
+
+    sell = next(s for s in summary["satellite_sell_signals"] if s["isin"] == "US88579Y1010")
+    assert sell["signal"] == "SELL"
+    assert sell["fundamentals_used"] is False
+
+
+def test_signal_exclusions_core_etf_and_suse_legacy():
+    """Ausschlussregeln: Core-ETF-Sparplan und SUSE/Legacy -> nie BUY/SELL.
+
+    Der Vanguard Core-ETF (category core) und SUSE (LU2722255754, illiquide
+    Legacy) sind weder Watchlist-Signale noch Sell-/Reduce-Kandidaten — die
+    Renderer-Sektionen zeigen sie nicht als Trade. NO-SIGNAL-Eintraege
+    (inkl. Ausschluss) werden in der Auswahl nicht uebernommen.
+    """
+    package = facts.build_facts_package(
+        _SIGNAL_PORTFOLIO,
+        [],
+        _SIGNAL_ANALYSIS,
+        _signal_news(),
+        _SIGNAL_STRATEGY,
+        mode="monday",
+        watchlist=_signal_watchlist(),
+    )
+    summary = package["deterministic_summary"]
+    all_signals = summary["watchlist_signals"] + summary["satellite_sell_signals"]
+    isins = {s["isin"] for s in all_signals}
+    # Core-ETF und SUSE/Legacy tauchen nirgends als Trade-Kandidat auf.
+    assert "IE00BK5BQT80" not in isins
+    assert "LU2722255754" not in isins
+    # NVIDIA (BUY) und 3M (SELL) sind als einzige Kandidaten vertreten.
+    assert "US5949724083" in isins
+    assert "US88579Y1010" in isins
+    # Kein einziges Signal-Objekt mit excluded=True in der Auswahl (gefiltert).
+    assert not any(s.get("excluded") for s in all_signals)
+
+
+def test_watchlist_signals_without_watchlist_are_empty(portfolio, transactions):
+    """Ohne Watchlist-Argument (None/fehlend): leere Signal-Listen, kein Crash."""
+    package = facts.build_facts_package(
+        portfolio, transactions, _SIGNAL_ANALYSIS, news=[], strategy=_SIGNAL_STRATEGY, mode="monday"
+    )
+    assert package["watchlist"] == []
+    assert package["deterministic_summary"]["watchlist_signals"] == []
+    assert package["deterministic_summary"]["satellite_sell_signals"] == []
+    json.dumps(package)  # JSON-serialisierbar
+
+
+def test_signal_selection_max_three_and_deterministic_rank():
+    """Max. 3 Watchlist-Signale; feste Rangfolge SELL > REDUCE > BUY > AVOID > WATCH.
+
+    Die Auswahl ist deterministisch (Label-Rang zuerst, dann Score absteigend),
+    unabhaengig von der Eingabe-Reihenfolge der Signale.
+    """
+    signals = [
+        {"isin": "W1", "signal": "WATCH", "score": 5, "excluded": False},
+        {"isin": "B2", "signal": "BUY", "score": 2, "excluded": False},
+        {"isin": "S1", "signal": "SELL", "score": -5, "excluded": False},
+        {"isin": "R1", "signal": "REDUCE", "score": -1, "excluded": False},
+        {"isin": "A1", "signal": "AVOID", "score": -3, "excluded": False},
+    ]
+    selected = facts._select_watchlist_signals(signals)
+    assert len(selected) == 3
+    assert [s["isin"] for s in selected] == ["S1", "R1", "B2"]  # SELL > REDUCE > BUY
+
+    # NO-SIGNAL-Eintraege (inkl. Core-ETF/Legacy-Ausschluss) fliegen raus.
+    with_no_signal = signals + [
+        {"isin": "NS1", "signal": "NO SIGNAL", "score": 0, "excluded": True},
+        {"isin": "NS2", "signal": "NO SIGNAL", "score": 0, "excluded": True},
+    ]
+    assert facts._select_watchlist_signals(with_no_signal) == selected
+
+    # Eingabe-Reihenfolge aendert nichts (stabiler Index nur als Tiebreaker).
+    reversed_selected = facts._select_watchlist_signals(list(reversed(signals)))
+    assert [s["isin"] for s in reversed_selected] == ["S1", "R1", "B2"]
+
+
+def test_satellite_sell_signals_only_selected_satellites():
+    """Sell-/Reduce-Sektion: nur SELL/REDUCE, keine excludierten, kein BUY/WATCH.
+
+    Core-ETFs und SUSE sind excluded (kein Kandidat); WATCH/BUY erscheinen
+    nie in der Sell-/Reduce-Sektion.
+    """
+    signals = [
+        {"isin": "S1", "signal": "SELL", "score": -3, "excluded": False},
+        {"isin": "R1", "signal": "REDUCE", "score": -1, "excluded": False},
+        {"isin": "B1", "signal": "BUY", "score": 4, "excluded": False},
+        {"isin": "W1", "signal": "WATCH", "score": 1, "excluded": False},
+        {"isin": "X1", "signal": "SELL", "score": -4, "excluded": True},  # Core-ETF/SUSE
+    ]
+    sell = facts._split_satellite_sell_signals(signals)
+    assert [s["isin"] for s in sell] == ["S1", "R1"]
+    assert facts._split_satellite_sell_signals(None) == []
+    assert facts._split_satellite_sell_signals(["nicht-dict"]) == []
+
+
+def test_signal_json_serializable_and_deterministic():
+    """Signal-Sektionen: JSON-serialisierbar und deterministisch (gleiche
+    Eingaben -> gleiche Auswahl)."""
+    package_a = facts.build_facts_package(
+        _SIGNAL_PORTFOLIO, [], _SIGNAL_ANALYSIS, _signal_news(), _SIGNAL_STRATEGY, mode="monday",
+        watchlist=_signal_watchlist(),
+    )
+    package_b = facts.build_facts_package(
+        _SIGNAL_PORTFOLIO, [], _SIGNAL_ANALYSIS, _signal_news(), _SIGNAL_STRATEGY, mode="monday",
+        watchlist=_signal_watchlist(),
+    )
+    summary_a = package_a["deterministic_summary"]
+    summary_b = package_b["deterministic_summary"]
+    json.dumps(package_a)  # serialisierbar
+    assert summary_a["watchlist_signals"] == summary_b["watchlist_signals"]
+    assert summary_a["satellite_sell_signals"] == summary_b["satellite_sell_signals"]
+    assert all(s.get("fundamentals_used") is False for s in summary_a["watchlist_signals"])
+    assert all(s.get("fundamentals_used") is False for s in summary_a["satellite_sell_signals"])

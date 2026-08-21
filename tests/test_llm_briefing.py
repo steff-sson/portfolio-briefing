@@ -377,24 +377,23 @@ def test_mode_prompts_forbid_derived_pcts_and_zero_from_empty_lists():
 
 
 def test_mode_prompts_use_five_section_contract():
-    """Mode-Prompts folgen dem 5-Sektionen-Output-Contract. Die fruehere
-    Ausbaustufen-Grenze (Verhaltens-Spiegel zu Trades, keine zeitliche
-    Transaktionsinterpretation) ist in der aktuellen Ausbaustufe bewusst
-    entfernt — die Prompts duerfen die alte Regel weder enthalten noch
-    mit 'nicht ableitbar' formulieren (zeitliche Interpretation ist in
-    dieser Struktur gar kein Regelungsgegenstand mehr)."""
+    """Mode-Prompts folgen dem Output-Contract: 5 Kernsektionen + abschliessende
+    Gesamt-Empfehlung (Plan §6a: ## Empfehlung). Die fruehere Ausbaustufen-
+    Grenze (Verhaltens-Spiegel zu Trades, keine zeitliche Transaktions-
+    interpretation) ist in der aktuellen Ausbaustufe bewusst entfernt."""
     for mode in ("monday", "friday", "monthly"):
         content = (llm_briefing.PROMPTS_DIR / f"{mode}.txt").read_text(encoding="utf-8")
-        # Neuer 5-Sektionen-Contract (entspricht verify.DRAFT_SECTIONS)
+        # Output-Contract (entspricht verify.DRAFT_SECTIONS + RECOMMENDATION_SECTION)
         for section in (
             "## Kurzlage",
             "## Datenqualität",
             "## Entscheidungsrelevante Punkte",
             "## Strategie-Abgleich",
             "## Relevante News & Veränderungen",
+            "## Empfehlung",
         ):
             assert section in content
-        assert "nur die 5 Sektionen" in content
+        assert "nur die 6 Sektionen" in content
         # Bewusst entfernte Verhaltens-Spiegel-Regel: nicht wieder einfuehren
         assert "Verhaltens-Spiegel" not in content
         assert "Ausbaustufen-Grenze" not in content

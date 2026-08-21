@@ -8,15 +8,50 @@ from scripts.llm_briefing import LLMError
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Feste Output-Sektionen des Draft-Contracts (config/prompts/{mode}.txt).
-# Entscheidungsorientierte 5-Sektionen-Struktur (Plan Phase 2.1).
+# Feste Output-Sektionen des kurzen Renderer-Contracts (Phase 5,
+# final_briefing.render_final_briefing): die Abschnittspruefung richtet sich
+# exakt an diesen Vertrag aus (## Kurzlage, ## Datenqualität,
+# ## Sell-/Reduce-Signale (bestehende Satellites), ## Watchlist-Signale,
+# ## Nächster Schritt).
+SELL_SIGNALS_SECTION = "## Sell-/Reduce-Signale (bestehende Satellites)"
+WATCHLIST_SIGNALS_SECTION = "## Watchlist-Signale"
+NEXT_STEP_SECTION = "## Nächster Schritt"
+
+# Alle Sektionen des kurzen Output-Formats in fester Reihenfolge.
 DRAFT_SECTIONS = [
     "## Kurzlage",
     "## Datenqualität",
+    SELL_SIGNALS_SECTION,
+    WATCHLIST_SIGNALS_SECTION,
+    NEXT_STEP_SECTION,
+]
+
+# Fruehere lange 5-Sektionen-Struktur (Plan Phase 2.1) — seit Phase 5 vom
+# kurzen Renderer-Contract abgeloest; nur noch fuer Kontextpruefungen relevant.
+_LEGACY_SECTIONS = [
     "## Entscheidungsrelevante Punkte",
     "## Strategie-Abgleich",
     "## Relevante News & Veränderungen",
 ]
+
+# Fundamentaldaten-Disclaimer (Phase 5): Muss in jeder Signal-Sektion stehen.
+# Signale stammen nie aus Fundamentaldaten (Umsatz/Gewinn/Cashflow/
+# Verschuldung/Bewertung sind nicht automatisch verfuegbar und fliessen
+# nicht in ein Signal) — nur aus Strategie-Fit, Portfolio-Fit,
+# 7-Tage-RSS-News und sc-Kursen. Identisch zu final_briefing.FUNDAMENTALS_DISCLAIMER
+# (ohne Import-Zyklus bewusst als Konstante dupliziert — fachlicher Contract).
+# Case-insensitive geprueft: der Marker ist ein Substring des Renderer-Texts,
+# die Pruefung vergleicht beide Seiten in Kleinschreibung (Umlaute,
+# Gross-/Kleinschreibung spielen keine Rolle).
+FUNDAMENTALS_DISCLAIMER = (
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
+    "nicht automatisch verfügbar"
+)
+
+# Abschliessende Gesamt-Empfehlungs-Sektion (Plan §6a): exakt ein Label
+# BUY|SELL|WATCH, 1:1 aus deterministic_summary.recommendation.
+RECOMMENDATION_SECTION = "## Empfehlung"
+RECOMMENDATION_LABELS = ("BUY", "SELL", "WATCH")
 
 # Sektionen fuer die Optionen-/Status-Kontextpruefung (Plan Phase 2.4/2.6).
 _OPTIONS_SECTION = "## Entscheidungsrelevante Punkte"
@@ -94,6 +129,313 @@ def _finding(severity: str, issue: str, evidence: str, correction: str) -> dict:
     }
 
 
+# --- Briefing-Schnittstelle (Plan §6a): Ampel-/Empfehlungs-Pruefung -----------
+
+# Deutsche Lesarten der sieben Kategorien (wie im Draft-Prompt STIL).
+_CATEGORY_GERMAN = {
+    "core_satellite": "Core-/Satelliten-Aufteilung",
+    "sector_concentration": "Sektorkonzentration",
+    "single_position": "Einzelposition",
+    "thesis_deadlines": "Thesen-Fristen",
+    "turnover": "Umschlag",
+    "trades_per_quarter": "Trades/Quartal",
+    "data_quality": "Datenqualität",
+}
+
+# Erlaubte Aktionen der Positionsvorschlaege.
+_POSITION_ACTIONS = ("aufstocken", "reduzieren", "verkaufen")
+
+
+def _traffic_lights(facts_package: dict) -> dict:
+    lights = facts_package.get("deterministic_summary", {}).get("traffic_lights")
+    return lights if isinstance(lights, dict) else {}
+
+
+def _recommendation(facts_package: dict) -> dict:
+    rec = facts_package.get("deterministic_summary", {}).get("recommendation")
+    return rec if isinstance(rec, dict) else {}
+
+
+def _position_actions(facts_package: dict) -> list:
+    actions = facts_package.get("deterministic_summary", {}).get("position_actions")
+    return actions if isinstance(actions, list) else []
+
+
+def _extract_recommendation_label(text: str) -> str | None:
+    """Genau ein Label (BUY|SELL|WATCH) in der '## Empfehlung'-Sektion."""
+    section = _extract_section(text, RECOMMENDATION_SECTION)
+    if section is None:
+        return None
+    found = [label for label in RECOMMENDATION_LABELS if re.search(rf"\b{label}\b", section)]
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+def _verify_traffic_lights(facts_package: dict, text: str, findings: list[dict]) -> None:
+    """Ampel 1:1: jede Kategorie mit Status im Faktenpaket; das LLM darf die
+    Ampel weder erfinden noch verschieben (keine 8. Kategorie, keine gelb-
+    statt-rot-Liste). Die Ampel-Labels stehen deterministisch fest.
+
+    Ohne Ampel-Daten im Faktenpaket (z.B. Orchestrator-Test-Mocks mit leerer
+    Analyse) wird die Pruefung uebersprungen — die Empfehlungs-Sektion bleibt
+    dann ebenfalls ungeprueft (kein deterministisches Label vorhanden).
+    """
+    lights = _traffic_lights(facts_package)
+    if not lights:
+        return
+    for cat, light in lights.items():
+        if not isinstance(light, dict) or light.get("status") not in ("green", "yellow", "red"):
+            findings.append(
+                _finding(
+                    "critical",
+                    f"Ampel-Kategorie '{cat}' ungueltig",
+                    f"traffic_lights[{cat}] = {light!r}, Status muss green|yellow|red sein",
+                    "Ampel deterministisch aus dem Faktenpaket uebernehmen",
+                )
+            )
+
+
+def _verify_recommendation(facts_package: dict, text: str, findings: list[dict]) -> None:
+    """Gesamt-Empfehlung (Plan §6a): exakt ein Label in '## Empfehlung', 1:1
+    mit dem deterministischen Label. Imperative Kauf-/Verkaufsanweisungen im
+    Fliesstext bleiben verboten (bestehender Contract).
+
+    Seit Phase 5 (kurzer Renderer-Contract, final_briefing.render_final_briefing)
+    existiert KEINE '## Empfehlung'-Sektion mehr im finalen Text — der kurze
+    Output enthält keine pauschale Gesamt-Empfehlung (test_no_pauschale_
+    seLL_recommendation). Die Sektion wird nur noch als Pflicht geprueft, wenn
+    der Text sie tatsaechlich enthaelt (Legacy-Drafts/Tests mit
+    '## Empfehlung'); ein Text ohne die Sektion ist kein Verstoss.
+
+    Ohne deterministisches Label (leeres Faktenpaket in Test-Mocks) wird die
+    Sektion nicht geprueft.
+    """
+    expected = _recommendation(facts_package).get("label")
+    if expected is None:
+        return
+    if RECOMMENDATION_SECTION not in text:
+        return
+    label = _extract_recommendation_label(text)
+    if label is None:
+        findings.append(
+            _finding(
+                "critical",
+                f"Fehlende oder mehrdeutige Gesamt-Empfehlung in '{RECOMMENDATION_SECTION}'",
+                f"Draft enthaelt nicht genau ein Label aus {', '.join(RECOMMENDATION_LABELS)}",
+                f"Sektion '{RECOMMENDATION_SECTION}' mit exakt einem Label BUY|SELL|WATCH ergaenzen",
+            )
+        )
+        return
+    if label != expected:
+        findings.append(
+            _finding(
+                "critical",
+                f"Gesamt-Empfehlung '{label}' weicht vom deterministischen Label ab",
+                f"deterministic_summary.recommendation.label = {expected}, Draft nennt {label}",
+                f"Label '{expected}' 1:1 uebernehmen (deterministisch abgeleitet, nicht LLM-gewaehlt)",
+            )
+        )
+
+
+def _verify_position_actions(facts_package: dict, text: str, findings: list[dict]) -> None:
+    """Top-3-Positionsvorschlaege (Plan §6a): Aktion + ISIN 1:1 aus dem
+    Faktenpaket; keine bloesse HOLD-Ausgabe; konkrete ISIN Pflicht."""
+    actions = _position_actions(facts_package)
+    if not actions:
+        return
+    if len(actions) > 3:
+        findings.append(
+            _finding(
+                "critical",
+                "Mehr als 3 Positionsvorschlaege",
+                f"position_actions enthaelt {len(actions)} Vorschlaege",
+                "Maximal 3 positionsbezogene Aenderungsvorschlaege ausgeben",
+            )
+        )
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        act = action.get("action")
+        isin = action.get("isin", "")
+        if act not in _POSITION_ACTIONS:
+            findings.append(
+                _finding(
+                    "critical",
+                    f"Unzulaessige Aktion '{act}'",
+                    f"position_actions[].action = {act!r}",
+                    f"Erlaubte Aktionen: {', '.join(_POSITION_ACTIONS)}",
+                )
+            )
+        if not isin or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", str(isin)):
+            findings.append(
+                _finding(
+                    "critical",
+                    "Positionsvorschlag ohne gueltige ISIN",
+                    f"position_actions[] = {action!r}",
+                    "Konkrete ISIN im Positionsvorschlag nennen",
+                )
+            )
+
+
+def _verify_glm_ideas(facts_package: dict, text: str, findings: list[dict]) -> None:
+    """Neukaufideen (Plan §6a): max. 2, als Idee kenntlich, mit Investmentthese
+    UND Risiko-Skizze sowie mind. 2 unabhaengigen Quellen; bei Unsicherheit
+    keine Idee.
+
+    Erkennung ist NICHT auf das Wort "Idee" angewiesen: eine konkrete
+    Neukaufidee liegt vor, wenn (a) ein Neukauf-/Kaufideen-/Idee-Marker, (b) eine
+    ISIN, die NICHT im Portfolio liegt (unbekanntes Wertpapier) oder (c) eine
+    Neukauf-Struktur ("Neu-Kandidat", "Kaufkandidat", "Neu-Investment") in der
+    Sektion "Entscheidungsrelevante Punkte" auftaucht. Erlaubte Texte ohne
+    Neukauf-Bezug (z.B. "Thesen-Idee", "keine Idee") werden nicht blockiert.
+    """
+    ideas_section = _extract_section(text, "## Entscheidungsrelevante Punkte") or ""
+    if not ideas_section.strip():
+        return
+
+    # Starke Marker (Neukauf-/Kauf-Kontext), die keine generische "Idee" sind.
+    strong_markers = re.findall(r"(?i)(neukauf|kaufidee|kaufkandidat|neu-kandidat|neu-investment)", ideas_section)
+    # ISINs in der Sektion, die NICHT im Portfolio liegen (unbekannte Wertpapiere).
+    portfolio_isins = {
+        str(h.get("isin", ""))
+        for h in facts_package.get("portfolio", {}).get("holdings", [])
+        if isinstance(h, dict) and h.get("isin")
+    }
+    unknown_isins = sorted(i for i in _extract_isins(ideas_section) if i not in portfolio_isins)
+    # Generisches "Idee" nur in Neukauf-Naehe (Kontext: Idee + These/Quellen/ISIN).
+    idea_word = re.search(r"(?i)\bidee\b", ideas_section)
+
+    has_idea = bool(strong_markers or unknown_isins or (idea_word and (strong_markers or unknown_isins)))
+    if not has_idea:
+        return
+
+    # Mind. 2 unabhaengige Quellen (Yahoo Finance zaehlt nicht automatisch).
+    news = facts_package.get("news", [])
+    if not isinstance(news, list):
+        news = []
+    eval_result = _news_independence(news)
+    if not eval_result["independent"]:
+        findings.append(
+            _finding(
+                "major",
+                "Neukaufidee ohne unabhaengige Quellenbasis",
+                f"News-Publisher: {eval_result['publishers']}, erfordert mind. {eval_result['min_sources']}",
+                "Neukaufidee nur mit mind. 2 unabhaengigen Publishern ausgeben oder entfernen",
+            )
+        )
+
+    # Ideen-Blocks zaehlen: explizite Ideen-Marker ODER unbekannte ISINs (je ISIN eine Idee).
+    idea_blocks = re.findall(r"(?im)^\s*[-*]\s*(?:Neukauf-?Idee|Kaufidee|Idee|Kaufkandidat)\s*\d*\s*:", ideas_section)
+    idea_count = max(len(idea_blocks), len(unknown_isins))
+    if idea_count > 2:
+        findings.append(
+            _finding(
+                "critical",
+                "Mehr als 2 Neukaufideen",
+                f"{idea_count} Ideen-Blocks/ISINs in der Sektion",
+                "Maximal 2 Neukaufideen (als Idee kenntlich) ausgeben",
+            )
+        )
+
+    # Pro Idee: Investmentthese (These/Begründung) UND Risiko-Skizze (Risiko/
+    # Gegenargument/Gefahr) erforderlich — pro Absatz geprueft, damit eine
+    # These einer anderen Idee nicht fuer diese zaehlt.
+    paragraphs = _paragraphs(ideas_section)
+    idea_paragraphs = [
+        p
+        for p in paragraphs
+        if re.search(r"(?i)(neukauf|kaufidee|kaufkandidat|neu-kandidat|neu-investment|\bidee\b)", p)
+        or _extract_isins(p)
+    ]
+    for paragraph in idea_paragraphs:
+        has_thesis = _has_marker(paragraph, _REASON_MARKERS) or re.search(r"(?i)\bthese\b", paragraph)
+        has_risk = _has_marker(paragraph, _COUNTER_MARKERS) or re.search(r"(?i)gefahr", paragraph)
+        if not has_thesis:
+            findings.append(
+                _finding(
+                    "major",
+                    "Neukaufidee ohne Investmentthese",
+                    f"Ideen-Block ohne These/Begründung: {paragraph[:120]!r}",
+                    "Pro Neukaufidee eine Investmentthese nennen",
+                )
+            )
+        if not has_risk:
+            findings.append(
+                _finding(
+                    "major",
+                    "Neukaufidee ohne Risiko-Skizze",
+                    f"Ideen-Block ohne Risiko/Gegenargument/Gefahr: {paragraph[:120]!r}",
+                    "Pro Neukaufidee eine kompakte Risiko-Skizze (Risiko/Gegenargument/Gefahr) nennen",
+                )
+            )
+
+
+def _news_independence(news: list) -> dict:
+    """Quellen-/Duplikatpruefung (Plan §6a): unabhaengig = mind. 2 verschiedene
+    Publisher (Yahoo Finance zaehlt nicht automatisch als unabhaengig)."""
+    from scripts.filter_news import evaluate_news_independence
+
+    return evaluate_news_independence(news)
+
+
+def _summary_watchlist_scores(summary: dict) -> list[float]:
+    """Score-Ganzzahlen der Watchlist-/Sell-Signale (Phase 5, Zahlen-Allowlist).
+
+    Nur die deterministischen Score-Ganzzahlen der Signal-Objekte (keine
+    Fundamentaldaten). Die Renderer-Sektion zeigt Scores als "+2"/"-1" — der
+    Draft darf genau diese Ganzzahlen referenzieren.
+    """
+    values: list[float] = []
+    for key in ("watchlist_signals", "satellite_sell_signals"):
+        for signal in summary.get(key, []) if isinstance(summary.get(key), list) else []:
+            if not isinstance(signal, dict):
+                continue
+            score = signal.get("score")
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                values.append(float(score))
+    return values
+
+
+def _verify_signal_sections(facts_package: dict, text: str, findings: list[dict]) -> None:
+    """Phase 5: kurze Signal-Sektionen + Fundamentaldaten-Disclaimer.
+
+    Prueft, ob alle Sektionen des kurzen Renderer-Contracts (DRAFT_SECTIONS:
+    ``## Kurzlage``, ``## Datenqualität``, ``## Sell-/Reduce-Signale (bestehende
+    Satellites)``, ``## Watchlist-Signale``, ``## Nächster Schritt``) im Text
+    vorhanden sind und ob die beiden Signal-Sektionen den Fundamentaldaten-
+    Disclaimer tragen (blockt, wenn fehlt — fail-closed). Naechster-Schritt-
+    Sektion wird nur auf Vorhandensein geprueft (determinierter Text ohne
+    Zahlen).
+    """
+    for section in DRAFT_SECTIONS:
+        if not re.search(rf"^{re.escape(section)}$", text, re.MULTILINE):
+            findings.append(
+                _finding(
+                    "critical",
+                    f"Fehlende Sektion {section}",
+                    f"Draft enthaelt keine Zeile '{section}'",
+                    f"Sektion {section} als eigene Markdown-Ueberschrift ergaenzen",
+                )
+            )
+    # Fundamentaldaten-Disclaimer nur in den Signal-Sektionen (nicht naechster
+    # Schritt) — case-insensitive geprueft (Umlaute, Gross-/Kleinschreibung).
+    # Der Renderer haengt den Disclaimer ohne nachfolgenden Punkt an die
+    # Signal-Zeilen an; die Pruefung bleibt ein Substring-Match.
+    disclaimer_lower = FUNDAMENTALS_DISCLAIMER.lower()
+    for section in (SELL_SIGNALS_SECTION, WATCHLIST_SIGNALS_SECTION):
+        content = _section_content(_extract_section(text, section)) or ""
+        if disclaimer_lower not in content.lower():
+            findings.append(
+                _finding(
+                    "critical",
+                    f"Fundamentaldaten-Disclaimer fehlt in {section}",
+                    "Signal-Sektion ohne Hinweis auf fehlende Fundamentaldaten",
+                    "Hinweis ergaenzen: Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) sind nicht automatisch verfügbar und fließen nicht in das Signal ein",
+                )
+            )
+
+
 def _extract_numbers(text: str) -> list[float]:
     """Alle Prozentzahlen im Text (Punkt ODER Komma als Dezimaltrenner).
 
@@ -109,6 +451,18 @@ def _extract_tickers(text: str) -> set[str]:
         "LLM", "API", "HTTP", "USD", "EUR", "ETF", "MVP", "RSS", "Q4", "AI", "OK",
         "USA", "IPO", "CEO", "GDP", "CPI", "EPS", "NASDAQ", "NYSE", "CNBC", "DAX",
         "S&P", "MSCI", "FTSE",
+        # Gesamt-Empfehlungs-Labels (Plan §6a) — keine Ticker.
+        "BUY", "SELL", "WATCH",
+        # Deterministische Signal-Labels (Phase 5, final_briefing._SIGNAL_LABELS):
+        # "NO SIGNAL" (rendered z.B. als "Keine Watchlist-Signale (NO SIGNAL
+        # für alle Positionen).") ist ein Signal-Status, kein Ticker.
+        "NO", "SIGNAL",
+        # Weitere Signal-Labels (final_briefing._SIGNAL_LABELS): AVOID/REDUCE
+        # sind Signal-Status gerenderter Sell-/Watchlist-Signale, keine Ticker.
+        "AVOID", "REDUCE",
+        # SUSE SE (LU2722255754, illiquide Legacy-Position): gerenderte
+        # Signal-/Legacy-Texte nennen "SUSE" als Holdingnamen, kein Ticker.
+        "SUSE",
         # Finanz-/Rechtsform-Token — keine Ticker (geschlossene Blocklist).
         "SE", "ISIN", "WKN", "AG", "KG", "SA", "NV", "BV",
         "PLC", "LTD", "INC", "CORP", "CO",
@@ -119,6 +473,30 @@ def _extract_tickers(text: str) -> set[str]:
 
 def _extract_isins(text: str) -> set[str]:
     return set(re.findall(r"[A-Z]{2}[A-Z0-9]{9}\d", text))
+
+
+def _portfolio_name_words(holdings: list) -> set[str]:
+    """Tokens aus echten Holding-Namen (Allowlist für den Ticker-Check).
+
+    Live-Fehler: Holdings stehen im Portfolio nur über ISINs (kein Ticker-
+    Feld). Echte Namens-Bestandteile wie 'SRI' (iShares MSCI World SRI),
+    'IMI' (iShares Core MSCI Emerging Markets IMI) oder 'ADR' (BioNTech ADR)
+    sahen für ``_extract_tickers`` wie erfundene Ticker aus und blockierten
+    den Versand als major. Diese Tokens sind Teil eines echten Portfolio-
+    Holdingnamens und werden freigegeben, wenn die zugehörige Holding über
+    eine Portfolio-ISIN vorhanden ist. Unbekannte Ticker/ISINs, die weder
+    Portfolio-Ticker/ISIN noch Bestandteil eines Holdingnamens oder eines
+    referenzierten News-Titels sind, bleiben major (fail-closed).
+    """
+    words: set[str] = set()
+    for h in holdings:
+        if not isinstance(h, dict):
+            continue
+        name = h.get("name")
+        if not name or not h.get("isin"):
+            continue  # nur Holdings mit Portfolio-ISIN zählen als echte Bestände
+        words.update(word.upper() for word in re.findall(r"[A-Za-z]{2,}", str(name)))
+    return words
 
 
 def _summary_numbers_pct(summary: dict) -> list[float]:
@@ -334,6 +712,15 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 )
             )
 
+    # 1a. Briefing-Schnittstelle (Plan §6a): Ampeln (7 Kategorien), Gesamt-
+    #     Empfehlung (## Empfehlung, 1:1), Positionsvorschlaege, Neukaufideen.
+    _verify_traffic_lights(facts_package, text, findings)
+    _verify_recommendation(facts_package, text, findings)
+    _verify_position_actions(facts_package, text, findings)
+    _verify_glm_ideas(facts_package, text, findings)
+    # 1b. Phase 5: kurze Signal-Sektionen + Fundamentaldaten-Disclaimer.
+    _verify_signal_sections(facts_package, text, findings)
+
     # 2. Status-Konformitaet — nur in der KURZLAGE-Sektion (Plan Phase 2.6):
     #    Konformitaetsphrasen ("Alle Grenzen eingehalten"/"Ruhige Woche"/
     #    "Kein Handlungsbedarf") sind nur ohne rote/gelbe Checks erlaubt;
@@ -393,6 +780,7 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     #    critical, egal wie nah sie an einem erlaubten Wert liegen).
     thresholds = facts_package.get("strategy_thresholds_pct", {})
     allowed = _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
+    allowed += _summary_watchlist_scores(summary)  # Phase 5: Signal-Score-Ganzzahlen
     allowed_formatted = sorted({f"{value:.1f}" for value in allowed})
     for num in _extract_numbers(text):
         if f"{num:.1f}" not in allowed_formatted:
@@ -409,7 +797,22 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     holdings = facts_package.get("portfolio", {}).get("holdings", [])
     portfolio_tickers = {h.get("ticker", "") for h in holdings if h.get("ticker")}
     portfolio_isins = {h.get("isin", "") for h in holdings if h.get("isin")}
+    # Tokens aus echten Holding-Namen (Allowlist): 'SRI'/'IMI'/'ADR' etc. sind
+    # Bestandteil eines Portfolio-Holdingnamens, keine erfundenen Ticker.
+    holding_name_words = _portfolio_name_words(holdings)
+    # News-Titel aus dem Faktenpaket (Bestand + gezielte Neukauf-Recherche):
+    # deren Woerter/Tokens sind referenzierte Titel, keine erfundenen Ticker.
+    news_titles = {
+        str(n.get("title", ""))
+        for n in facts_package.get("news", [])
+        if isinstance(n, dict) and n.get("title")
+    }
+    news_words = set()
+    for title in news_titles:
+        news_words.update(word.upper() for word in re.findall(r"[A-Za-z]{2,}", title))
     for ticker in _extract_tickers(text):
+        if ticker in news_words or ticker in holding_name_words:
+            continue  # Teil eines referenzierten News-Titels oder echten Holdingnamens
         if ticker not in portfolio_tickers and ticker not in portfolio_isins:
             findings.append(
                 _finding(
@@ -587,7 +990,10 @@ def verify_briefing(
         if h.get("ticker"):
             portfolio_tickers.add(h.get("ticker", ""))
         portfolio_isins.add(h.get("isin", ""))
+    holding_name_words = _portfolio_name_words(portfolio.get("holdings", []))
     for ticker in mentioned_tickers:
+        if ticker in holding_name_words:
+            continue  # Bestandteil eines echten Portfolio-Holdingnamens
         if ticker not in portfolio_tickers and ticker not in portfolio_isins:
             warnings.append(f"Ticker/ISIN {ticker} im Briefing nicht im Portfolio")
 

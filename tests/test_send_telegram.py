@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -425,3 +426,154 @@ def test_send_briefing_chunk_failure_returns_false_but_sends_remaining(
     assert "## Sektion 3" in payloads[1]["text"]  # fehlgeschlagener Chunk (HTTP 500)
     assert "## Sektion 6" in payloads[2]["text"]  # Rest wurde trotzdem gesendet
     assert FAKE_TOKEN not in caplog.text
+
+
+# --- Retention (nur 4 neueste echte Briefings) ------------------------------
+
+
+def _write_briefing(vault: Path, name: str, content: str = "Inhalt") -> None:
+    vault.mkdir(parents=True, exist_ok=True)
+    (vault / name).write_text(content, encoding="utf-8")
+
+
+def _make_vault_with_mix(tmp_path) -> Path:
+    """Vault mit echten Briefings + Dry-Run-/Fremd-Dateien."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    _write_briefing(vault, "2026-01-01-monday.md")
+    _write_briefing(vault, "2026-01-05-monday.md")
+    _write_briefing(vault, "2026-01-09-friday.md")
+    _write_briefing(vault, "2026-01-12-monday.md")
+    _write_briefing(vault, "2026-01-16-friday.md")
+    _write_briefing(vault, "2026-01-19-monday.md")  # neuestes echtes Briefing
+    _write_briefing(vault, "2026-01-19-monday-dryrun.md")  # bleibt immer
+    _write_briefing(vault, "2026-01-20-healthcheck.md")  # bleibt immer
+    _write_briefing(vault, "notes.md")  # bleibt immer
+    return vault
+
+
+def test_retain_keeps_four_newest_briefings_only(tmp_path, monkeypatch):
+    """Nur die 4 neuesten echten Briefings bleiben; Rest wird geloescht."""
+    vault = _make_vault_with_mix(tmp_path)
+    monkeypatch.setattr(send_telegram, "VAULT_DIR", vault)
+
+    removed = send_telegram._retain_briefings()
+
+    kept = sorted(p.name for p in vault.iterdir())
+    assert kept == [
+        "2026-01-09-friday.md",
+        "2026-01-12-monday.md",
+        "2026-01-16-friday.md",
+        "2026-01-19-monday-dryrun.md",
+        "2026-01-19-monday.md",
+        "2026-01-20-healthcheck.md",
+        "notes.md",
+    ]
+    assert sorted(p.name for p in removed) == ["2026-01-01-monday.md", "2026-01-05-monday.md"]
+
+
+def test_retain_keeps_three_modes_mixed(tmp_path, monkeypatch):
+    """Retention zaehlt monday/friday/monthly gemeinsam (Datums-Sortierung)."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    _write_briefing(vault, "2026-01-05-monday.md")
+    _write_briefing(vault, "2026-02-06-friday.md")
+    _write_briefing(vault, "2026-03-07-monthly.md")
+    _write_briefing(vault, "2026-04-08-monday.md")
+    _write_briefing(vault, "2026-05-09-friday.md")
+    monkeypatch.setattr(send_telegram, "VAULT_DIR", vault)
+
+    removed = send_telegram._retain_briefings()
+
+    kept = sorted(p.name for p in vault.iterdir())
+    assert kept == ["2026-02-06-friday.md", "2026-03-07-monthly.md", "2026-04-08-monday.md", "2026-05-09-friday.md"]
+    assert [p.name for p in removed] == ["2026-01-05-monday.md"]
+
+
+def test_retain_keeps_all_when_four_or_fewer(tmp_path, monkeypatch):
+    """<=4 echte Briefings: nichts wird geloescht."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    for name in ("2026-01-01-monday.md", "2026-01-02-friday.md", "2026-01-03-monthly.md"):
+        _write_briefing(vault, name)
+    monkeypatch.setattr(send_telegram, "VAULT_DIR", vault)
+
+    assert send_telegram._retain_briefings() == []
+    assert sorted(p.name for p in vault.iterdir()) == [
+        "2026-01-01-monday.md",
+        "2026-01-02-friday.md",
+        "2026-01-03-monthly.md",
+    ]
+
+
+def test_retain_ignores_non_briefing_files(tmp_path, monkeypatch):
+    """Dry-Run-, Healthcheck- und andere Dateien werden nie geloescht."""
+    vault = _make_vault_with_mix(tmp_path)
+    monkeypatch.setattr(send_telegram, "VAULT_DIR", vault)
+
+    removed = send_telegram._retain_briefings()
+
+    survivors = [p.name for p in removed]
+    assert "2026-01-19-monday-dryrun.md" not in survivors
+    assert "2026-01-20-healthcheck.md" not in survivors
+    assert "notes.md" not in survivors
+    assert (vault / "2026-01-19-monday-dryrun.md").exists()
+    assert (vault / "2026-01-20-healthcheck.md").exists()
+    assert (vault / "notes.md").exists()
+
+
+def test_archive_triggers_retention_after_successful_archive(monkeypatch, tmp_path):
+    """send_briefing: Archivieren + Retention fuer echte Briefings, nie fuer Alerts."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _capture)
+
+    # 6 echte Briefings vortesten, dann ein neues archivieren -> nur 4 bleiben.
+    for name in ("2026-01-01-monday.md", "2026-01-05-monday.md", "2026-01-09-friday.md",
+                 "2026-01-12-monday.md", "2026-01-16-friday.md", "2026-01-19-monday.md"):
+        _write_briefing(tmp_path / "vault", name)
+
+    class _FakeDateTime:
+        @staticmethod
+        def now():
+            return type("_DT", (), {"strftime": lambda self, _: "2026-01-23"})()
+
+    monkeypatch.setattr(send_telegram, "datetime", _FakeDateTime)
+
+    assert send_telegram.send_briefing(BRIEFING, "monday") is True
+
+    kept = sorted(p.name for p in (tmp_path / "vault").iterdir())
+    assert kept == [
+        "2026-01-12-monday.md",
+        "2026-01-16-friday.md",
+        "2026-01-19-monday.md",
+        "2026-01-23-monday.md",
+    ]
+
+
+def test_archive_triggers_retention_never_for_alert(monkeypatch, tmp_path):
+    """Alert-Modus: archiviert nie -> auch keine Retention."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _capture)
+    for name in ("2026-01-01-monday.md", "2026-01-05-monday.md", "2026-01-09-friday.md",
+                 "2026-01-12-monday.md", "2026-01-16-friday.md", "2026-01-19-monday.md"):
+        _write_briefing(tmp_path / "vault", name)
+
+    assert send_telegram.send_briefing(ALERT_TEXT, "alert") is True
+
+    # Unveraendert: 6 Briefings (plus nichts Neues), keine Retention.
+    assert sorted(p.name for p in (tmp_path / "vault").iterdir()) == [
+        "2026-01-01-monday.md", "2026-01-05-monday.md", "2026-01-09-friday.md",
+        "2026-01-12-monday.md", "2026-01-16-friday.md", "2026-01-19-monday.md",
+    ]

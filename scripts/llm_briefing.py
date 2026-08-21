@@ -52,6 +52,9 @@ def _load_prompt(mode: str, context: dict) -> str:
         strategy_diff=json.dumps(context.get("strategy_diff") or {}, ensure_ascii=False, indent=2),
         data_quality=json.dumps(context.get("data_quality") or {}, ensure_ascii=False, indent=2),
         changes=json.dumps(context.get("changes") or {}, ensure_ascii=False, indent=2),
+        traffic_lights=json.dumps(context.get("traffic_lights") or {}, ensure_ascii=False, indent=2),
+        recommendation=json.dumps(context.get("recommendation") or {}, ensure_ascii=False, indent=2),
+        position_actions=json.dumps(context.get("position_actions") or [], ensure_ascii=False, indent=2),
     )
 
 
@@ -121,6 +124,11 @@ def _draft_context(facts_package: dict) -> dict:
         "triggers": compute_triggers(facts_package),
         "strategy_diff": facts_package.get("strategy_diff") or {},
         "data_quality": facts_package.get("data_quality") or {},
+        # Briefing-Schnittstelle (Plan §6a): Ampeln, Gesamt-Empfehlung und
+        # Positionsvorschlaege sind deterministisch — das LLM uebernimmt sie 1:1.
+        "traffic_lights": summary.get("traffic_lights", {}),
+        "recommendation": summary.get("recommendation", {}),
+        "position_actions": summary.get("position_actions", []),
     }
 
 

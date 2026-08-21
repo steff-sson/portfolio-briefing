@@ -7,13 +7,16 @@ INPUT:
 
 AUFGABE:
 Überarbeite den Entwurf unter Behebung aller major Findings.
-Behalte den OUTPUT-CONTRACT (5 Sektionen) bei:
+Behalte den OUTPUT-CONTRACT (5 Kernsektionen + abschließende Empfehlung) bei:
 
 ## Kurzlage
 ## Datenqualität
 ## Entscheidungsrelevante Punkte
 ## Strategie-Abgleich
 ## Relevante News & Veränderungen
+## Empfehlung
+
+Die Gesamt-Empfehlung (## Empfehlung) ist deterministisch vorgegeben (BUY/SELL/WATCH aus dem Faktenpaket) — Label 1:1 übernehmen, nicht selbst wählen. Die Ampeln und Positionsvorschläge ebenfalls 1:1 übernehmen.
 
 OPTIONEN-REGEL (zwingend):
 - Optionen (halten/reduzieren/aufstocken) NUR bei:
@@ -33,7 +36,7 @@ OPTIONEN-REGEL (zwingend):
 REGELN:
 - Zahlen NUR aus dem Faktenpaket. Prozentwerte NUR 1:1 aus deterministic_summary (Verhältniszahl × 100) bzw. strategy_thresholds_pct (bereits Prozentwerte) übernehmen — identischer Wert UND identische Schreibweise (1 Dezimalstelle mit Punkt, z.B. "24.8%"); nie erfinden, ableiten, konvertieren, runden oder Einzel-Positionsgewichte nennen (stehen NICHT im Faktenpaket).
 - Ticker/ISIN NUR aus dem Portfolio im Faktenpaket.
-- Keine finale Empfehlung. Kein "Sie sollten".
+- Keine finale Empfehlung. Kein "Sie sollten". (Ausnahme: deterministische "## Empfehlung"-Sektion mit exakt einem Label.)
 - DATENQUALITÄT VORRANG: Ist der Datenqualitäts-Status nicht "ok", KEINE Optionen generieren — das Datenqualitäts-Problem benennen statt Grenzverletzungen zu bewerten.
 - STATUS-REGELN (zwingend):
   - Liste roter Punkte nicht leer: rote Punkte namentlich benennen, KEINE Konformitätsphrase ("Alle Grenzen eingehalten"/"Ruhige Woche").
@@ -48,6 +51,6 @@ STIL:
 - Kurze Fließtexte statt Listen-Dumps, natürliche Übergänge; den Status verständlich als grün/gelb/rot benennen (z.B. "weiterhin grün" oder "auf gelb gewechselt").
 - Keine Anlageempfehlungen, kein "Sie sollten".
 
-- Keine Einleitung, kein Disclaimer, nur die 5 Sektionen.
+- Keine Einleitung, kein Disclaimer, nur die 6 Sektionen.
 
 OUTPUT: Nur der überarbeitete Markdown-Entwurf, keine Einleitung.

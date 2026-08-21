@@ -10,16 +10,20 @@ promote_staged zur Baseline; jeder Fehlerpfad davor verwirft staged
 (discard_staged) — fehlgeschlagene Laeufe schreiben die Baseline nie fort.
 Persistenz nur ueber das Snapshot-Modul (kein update_config).
 
-Deterministisches Faktenpaket → DeepSeek-Draft → verify_draft → glm-5.2-
-Review → (bedingt: deepseek-v4-flash-Revision, maximal MAX_REVISIONS) →
-final_gate → Versand. overall_verdict `block`, kritische Findings,
-ungueltiges Review oder wiederholte Verify-Fehler blockieren den Versand
-fail-closed (nur Alert, keine Vault-Datei).
+Deterministisches Faktenpaket → DeepSeek-Draft → final_briefing-Render →
+verify_draft → glm-5.2-Review → (bedingt: deepseek-v4-flash-Revision,
+maximal MAX_REVISIONS, danach erneuter Render + verify) → final_gate →
+Versand. overall_verdict `block`, kritische Findings, ungueltiges Review
+oder wiederholte Verify-Fehler blockieren den Versand fail-closed (nur
+Alert, keine Vault-Datei). Der produktive Verify-/Review-/Final-Gate-Pfad
+prueft den gerenderten Text (Teil 2); der Dry-Run-Pfad nutzt unveraendert
+_dry_run_placeholder.
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import traceback
 from datetime import datetime
@@ -30,6 +34,7 @@ from scripts import (
     diff,
     facts,
     filter_news,
+    final_briefing,
     llm_briefing,
     llm_review,
     llm_revise,
@@ -48,21 +53,163 @@ VAULT_DIR = Path.home() / "docs" / "notizen" / "portfolio-briefings"
 # Maximal eine Revision (Plan §6.1: max_revisions: 1) — kein Endlos-Loop.
 MAX_REVISIONS = 1
 
+# --- GLM-Review-Kontrakt: deterministische Sektionen --------------------------
+# Die Sektionen der finalen Briefing-Datei werden von Python deterministisch
+# aus dem Faktenpaket gerendert (final_briefing.py). Der Review-Prompt
+# (config/prompts/review.txt) verpflichtet GLM, dort KEINE eigenen Status-,
+# Zahlen-, Kategorien-, Transaktions- oder Strategieänderungen zu behaupten.
+# Trotzdem kann ein bestehendes Review-JSON solche halluzinierten Findings
+# enthalten. Der Orchestrator filtert ausschließlich Findings, die klar diese
+# deterministischen Sektionen/Fakten betreffen; andere echte Review-Findings
+# (unerlaubte Handlungsempfehlungen, ## Kurzlage-Verstöße gegen die
+# Zusammenfassung) bleiben fail-closed blockierend.
+#
+# Der Filter ist bewusst konservativ (Keyword-basiert, kein Textverständnis):
+# - Deterministische Sektionen werden nur als SUBJEKT des Findings (issue)
+#   gewertet — die bloße Nennung in evidence (z. B. "Kaufanweisung außerhalb
+#   von ## Entscheidungsrelevante Punkte") ist eine Ortsangabe, kein
+#   Fakten-Finding.
+# - Findings, die die ## Kurzlage erwähnen, werden NIE gefiltert: GLM darf die
+#   Kurzlage gegen die deterministische Zusammenfassung prüfen.
+# - Generische Terme wie status/zahl/rot/position werden bewusst NICHT als
+#   Filterkriterium genutzt — sie können in echten Kurzlage-Findings
+#   vorkommen und müssen dann fail-closed blockieren.
+_DETERMINISTIC_SECTIONS = (
+    "Datenqualität",
+    "Entscheidungsrelevante Punkte",
+    "Strategie-Abgleich",
+    "Relevante News & Veränderungen",
+    "Empfehlung",
+)
+# Wortgrenzen: "Handlungsempfehlung" trifft "Empfehlung" NICHT (nur die
+# eigenständige Sektions-/Label-Nennung), "Entscheidungsrelevante Punkte"
+# nur als vollständige Sektion.
+_DETERMINISTIC_SECTION_RE = re.compile(
+    r"(?i)\b(" + "|".join(re.escape(s) for s in _DETERMINISTIC_SECTIONS) + r")\b"
+)
+# Klare deterministische Fakten-Themen (Substring, case-insensitive):
+# Transaktionen, Datenqualität, gerenderte Veränderungszeilen (Hinzugekommen/
+# Entfernt/Geändert), Ampel-Kategorien. BUY/SELL/WATCH mit Wortgrenzen (das
+# deterministische Empfehlungs-Label).
+_DETERMINISTIC_FACT_TERMS = (
+    "datenqualität",
+    "datenqualitaet",
+    "transaktion",
+    "hinzugekommen",
+    "hinzugefügt",
+    "hinzugefuegt",
+    "entfernt",
+    "geändert",
+    "geaendert",
+    "ampel",
+    "kategorie",
+    "strategieänderung",
+    "strategieänderungen",
+    "strategie-aenderung",
+    "strategie-änderung",
+)
+_DETERMINISTIC_LABEL_RE = re.compile(r"(?i)\b(buy|sell|watch)\b")
+
+
+def _finding_touches_deterministic_sections(finding: dict) -> bool:
+    """True, wenn ein Review-Finding klar die deterministischen Sektionen
+    bzw. deterministische Fakten betrifft (konservativ, Keyword-basiert).
+
+    Treffer, wenn (a) eine deterministische Sektion als Subjekt (issue)
+    genannt ist — ## Datenqualität, ## Entscheidungsrelevante Punkte,
+    ## Strategie-Abgleich, ## Relevante News & Veränderungen, ## Empfehlung —
+    oder (b) ein deterministischer Faktenterm (Transaktionen, Datenqualität,
+    Hinzugekommen/Entfernt/Geändert, Ampel-Kategorie, BUY/SELL/WATCH-Label)
+    in issue/evidence/correction vorkommt. Findings, die die ## Kurzlage
+    betreffen, werden NIE gefiltert (GLM darf sie gegen die Zusammenfassung
+    prüfen); Findings ohne klaren Bezug (z. B. unerlaubte
+    Handlungsempfehlungen) bleiben fail-closed blockierend.
+    """
+    issue = str(finding.get("issue", ""))
+    evidence = str(finding.get("evidence", ""))
+    correction = str(finding.get("correction", ""))
+    haystack = f"{issue} {evidence} {correction}".lower()
+    # ## Kurzlage ist der EINZIGE semantische Review-Bereich: solche Findings
+    # sind echt (Zusammenfassungs-Abgleich) und dürfen nie gefiltert werden.
+    if "kurzlage" in haystack:
+        return False
+    if _DETERMINISTIC_SECTION_RE.search(issue):
+        return True
+    if _DETERMINISTIC_LABEL_RE.search(haystack):
+        return True
+    for term in _DETERMINISTIC_FACT_TERMS:
+        if term in haystack:
+            return True
+    return False
+
+
+def _filter_review_findings(review: object) -> dict:
+    """Filtert klar deterministische Review-Findings aus (defensiv, unverändert
+    bei Nicht-Dict/fehlendem findings-Key).
+
+    Nur Findings, die eindeutig die deterministischen Sektionen/Fakten
+    betreffen (siehe _finding_touches_deterministic_sections), werden entfernt.
+    Echte Review-Findings (unerlaubte Handlungsempfehlungen, ## Kurzlage-
+    Verstöße) bleiben erhalten und blockieren weiterhin fail-closed.
+
+    Wurden ALLE Findings als halluziniert gefiltert, hat das overall_verdict
+    keine verbleibende Basis mehr: es wird auf "pass" gesetzt, damit ein
+    reines Halluzinations-Review den Gate nicht blockiert (kein Verschwenden
+    einer Revision). Bleiben echte Findings übrig, bleibt das Verdict
+    unangetastet (fail-closed).
+    """
+    if not isinstance(review, dict):
+        return review  # type: ignore[return-value]
+    findings = review.get("findings")
+    if not isinstance(findings, list):
+        return review  # type: ignore[return-value]
+    filtered = [f for f in findings if not _finding_touches_deterministic_sections(f)]
+    if len(filtered) == len(findings):
+        return review  # type: ignore[return-value]
+    result = {**review, "findings": filtered}
+    if not filtered:
+        result["overall_verdict"] = "pass"
+    return result
+
 # Dry-Run-Platzhalter statt Fehlerstring: explizit als Dry-Run markiert,
 # damit kein Fehlertext als Briefing durch die Pipeline laeuft. Sektionen
-# entsprechen exakt dem 5-Sektionen-Output-Contract (verify.DRAFT_SECTIONS).
-DRY_RUN_PLACEHOLDER = (
-    "## Kurzlage\n"
-    "Dry-Run — kein LLM-Call.\n\n"
-    "## Datenqualität\n"
-    "—\n\n"
-    "## Entscheidungsrelevante Punkte\n"
-    "—\n\n"
-    "## Strategie-Abgleich\n"
-    "—\n\n"
-    "## Relevante News & Veränderungen\n"
-    "—"
-)
+# entsprechen exakt dem kurzen Output-Contract (verify.SHORT_SECTIONS).
+def _dry_run_placeholder(facts_package: dict | None) -> str:
+    """Dry-Run-Platzhalter statt Fehlerstring: explizit als Dry-Run markiert,
+    damit kein Fehlertext als Briefing durch die Pipeline laeuft. Sektionen
+    entsprechen exakt dem kurzen Output-Contract (Phase 5, verify.SHORT_SECTIONS).
+    Die Signal-Sektionen uebernehmen die deterministischen Signale aus dem
+    Faktenpaket (final_briefing-Renderer), damit verify auch im Dry-Run
+    konsistent bleibt. Der Fundamentaldaten-Disclaimer ist hart verankert.
+    """
+    label = "WATCH"
+    reason = "Dry-Run, keine deterministische Bewertung."
+    if facts_package is not None:
+        rec = facts_package.get("deterministic_summary", {}).get("recommendation", {})
+        if isinstance(rec, dict) and rec.get("label") in ("BUY", "SELL", "WATCH"):
+            label = rec["label"]
+            reason = f"Dry-Run — deterministisches Label: {rec.get('reason', label)}."
+    try:
+        summary = facts_package.get("deterministic_summary", {}) if facts_package is not None else {}
+        sell_section = final_briefing._section_sell_reduce_signals(summary)
+        watch_section = final_briefing._section_watchlist_signals(summary)
+        next_section = final_briefing._section_naechster_schritt(summary)
+    except Exception:
+        sell_section = "Keine Sell-/Reduce-Signale.\n\n" + final_briefing.FUNDAMENTALS_DISCLAIMER
+        watch_section = "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n\n" + final_briefing.FUNDAMENTALS_DISCLAIMER
+        next_section = "Nächste Woche neuer Lauf, keine Aktion erforderlich."
+    return (
+        "## Kurzlage\n"
+        "Dry-Run — kein LLM-Call.\n\n"
+        "## Datenqualität\n"
+        "—\n\n"
+        "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+        f"{sell_section}\n\n"
+        "## Watchlist-Signale\n"
+        f"{watch_section}\n\n"
+        "## Nächster Schritt\n"
+        f"{next_section}"
+    )
 
 
 def _setup_logging() -> None:
@@ -142,6 +289,8 @@ def run(mode: str, dry_run: bool = False) -> int:
     # staged ueber das finally unten — ein fehlgeschlagener Lauf schreibt die
     # Baseline nie fort.
     staged_promoted = False
+    previous = None
+    staged = None
     try:
         # Stufe 1: deterministisches Faktenpaket
         try:
@@ -149,6 +298,7 @@ def run(mode: str, dry_run: bool = False) -> int:
                 # Dry-Run: ausschliesslich Mock-Daten als Datenquelle — kein
                 # sc-Aufruf, kein Snapshot-/Diff-Schreiben, keine Live-Config.
                 portfolio, transactions = sc_bridge.load_mock()
+                watchlist = sc_bridge.load_mock_watchlist()
                 changes = None
                 strategy = analyze.load_strategy()  # validiert intern (fail-closed)
                 data_quality = analyze.assess_data_quality(portfolio, None)
@@ -173,12 +323,21 @@ def run(mode: str, dry_run: bool = False) -> int:
                 )
                 changes = diff.diff_snapshots(previous, staged["snapshot"])
                 logging.info(f"snapshot staged (previous: {previous is not None})")
+                # Watchlist-Abruf (Phase 6 Interface): produktiver Abruf ist
+                # fail-closed; eine leere Watchlist ist ein legitimer Zustand.
+                watchlist = sc_bridge.fetch_watchlist_from_sc()
             analysis = analyze.analyze_portfolio(portfolio, transactions, strategy)
             if dry_run:
                 # Dry-Run: vollstaendig netzwerkfrei — kein RSS-/News-Fetch.
                 news: list = []
             else:
                 news = filter_news.fetch_and_filter_news(portfolio)
+                # Neukaufideen-Basis (Plan §6a): gezielte Recherche fuer
+                # unbekannte Wertpapiere ergaenzen die Bestands-News — die
+                # Quellen-/Duplikatpruefung bewertet beide gemeinsam.
+                idea_news = filter_news.fetch_news_for_unlisted_ideas(portfolio)
+                seen = {str(n.get("title", "")) for n in news if isinstance(n, dict)}
+                news = news + [n for n in idea_news if isinstance(n, dict) and str(n.get("title", "")) not in seen]
             facts_package = facts.build_facts_package(
                 portfolio,
                 transactions,
@@ -188,6 +347,9 @@ def run(mode: str, dry_run: bool = False) -> int:
                 mode=mode,
                 changes=changes,
                 data_quality=data_quality,
+                previous_snapshot=previous if not dry_run else None,
+                current_captured_at=staged["snapshot"]["captured_at"] if (not dry_run and staged) else None,
+                watchlist=watchlist,
             )
             logging.info("facts package built")
         except Exception as e:
@@ -200,10 +362,14 @@ def run(mode: str, dry_run: bool = False) -> int:
                 _alert(f"facts failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 2: DeepSeek-Draft (im Dry-Run Platzhalter, kein LLM-Call)
+        # Stufe 2: DeepSeek-Draft (im Dry-Run Platzhalter, kein LLM-Call).
+        # Danach folgt IMMER der deterministische Final-Render (Teil 2):
+        # der produktive Verify-/Review-/Final-Gate-Pfad prueft den
+        # gerenderten Text, nicht den rohen LLM-Draft. Der Dry-Run-Pfad
+        # behaelt unveraendert _dry_run_placeholder (kein Render).
         try:
             if dry_run:
-                draft = DRY_RUN_PLACEHOLDER
+                draft = _dry_run_placeholder(facts_package)
             else:
                 draft = llm_briefing.generate_draft(facts_package, mode=mode)
             logging.info("draft completed")
@@ -214,6 +380,20 @@ def run(mode: str, dry_run: bool = False) -> int:
         except Exception as e:
             _alert(f"draft failed: {e}\n{traceback.format_exc()}")
             return 1
+
+        # Stufe 2b: deterministischer Final-Render (Teil 2) — der LLM-Draft
+        # wird vollstaendig ersetzt: ab hier prueft verify/review/gate den
+        # gerenderten Briefing-Text (Kurzlage/Datenqualitaet/Punkte/
+        # Strategie/News/Empfehlung) 1:1 aus dem Faktenpaket. Render-Fehler
+        # sind fail-closed (kein Versand, keine Vault-Datei). Dry-Run
+        # ueberspringt den Render unveraendert (Platzhalter-Pfad).
+        if not dry_run:
+            try:
+                draft = final_briefing.render_final_briefing(facts_package, mode=mode)
+                logging.info("final briefing rendered (Teil 2)")
+            except Exception as e:
+                _alert(f"final render failed: {e}\n{traceback.format_exc()}")
+                return 1
 
         # Stufe 3: deterministische Draft-Verifikation
         verification: list[dict] = []
@@ -233,6 +413,12 @@ def run(mode: str, dry_run: bool = False) -> int:
         # pass -> unveraendert zum final_gate; revise (ohne kritische Findings) ->
         # deepseek-v4-flash-Revision -> verify_draft erneut -> erneutes Review.
         # block/kritisch/MAX erreicht/ungueltig -> final_gate entscheidet fail-closed.
+        #
+        # GLM-Review-Kontrakt (config/prompts/review.txt): die deterministisch
+        # gerenderten Sektionen sind KEIN Review-Bereich für Faktenbehauptungen.
+        # Liefert GLM trotzdem klar halluzinierte Findings zu diesen Sektionen/
+        # Fakten, filtert der Orchestrator genau diese aus — andere echte
+        # Review-Findings bleiben fail-closed blockierend.
         if dry_run:
             review = {"findings": [], "overall_verdict": "pass"}
         else:
@@ -247,6 +433,18 @@ def run(mode: str, dry_run: bool = False) -> int:
                 except Exception as e:
                     _alert(f"review failed: {e}\n{traceback.format_exc()}")
                     return 1
+
+                review = _filter_review_findings(review)
+                if (
+                    not isinstance(review, dict)
+                    or not isinstance(review.get("findings"), list)
+                    or "overall_verdict" not in review
+                ):
+                    # Defensiv: ungueltiges Review nach Filterung fail-closed behandeln.
+                    review = {"findings": [], "overall_verdict": "block"}
+                if review.get("findings"):
+                    kept = [f["issue"] for f in review["findings"]]
+                    logging.warning(f"review findings nach Filterung: {kept}")
 
                 verdict = review.get("overall_verdict")
                 has_critical = any(
@@ -267,6 +465,16 @@ def run(mode: str, dry_run: bool = False) -> int:
                         return 1
                     revision_count += 1
                     logging.info(f"revise completed ({revision_count}/{MAX_REVISIONS})")
+                    # Stufe 2b erneut: nach jeder Revision wird der Draft
+                    # erneut deterministisch gerendert (Teil 2) — verify und
+                    # Review pruefen immer den gerenderten Text, nie den
+                    # rohen LLM-Output. Render-Fehler sind fail-closed.
+                    try:
+                        draft = final_briefing.render_final_briefing(facts_package, mode=mode)
+                        logging.info("final briefing re-rendered after revision (Teil 2)")
+                    except Exception as e:
+                        _alert(f"final render failed: {e}\n{traceback.format_exc()}")
+                        return 1
                     # Stufe 3 erneut: revidierten Draft deterministisch verifizieren
                     try:
                         verification = verify.verify_draft(facts_package, draft)

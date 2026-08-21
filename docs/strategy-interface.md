@@ -17,20 +17,30 @@ Pipeline, wie wird validiert und wie werden Änderungen erkannt.
 
 ## 1. Dateiablage
 
-- **Persönliche Strategie:** `config/strategy.yaml` — wird von der Pipeline geladen.
-- **Gitignored:** `config/strategy.yaml` ist in `.gitignore` (persönliche Strategie,
-  darf nie committet werden). Ebenso gitignored: `config/snapshot.current.json` und
-  `config/snapshots/` (enthalten `strategy_content` als JSON).
+- **Persönliche Strategie:** `config/strategy.yaml` — wird von der Pipeline geladen
+  und deterministisch aus `config/setup/answers.reviewed.yaml` erzeugt
+  (`scripts/setup_strategy.py --emit`, inkl. Review-Backup nach
+  `config/setup/backup/`).
+- **Gitignored:** `config/strategy.yaml`, `config/setup/` (persönliche Antworten),
+  `config/snapshot.current.json` und `config/snapshots/` (enthalten
+  `strategy_content` als JSON). **Nicht gitignored:** `config/strategy.schema.yaml`
+  (Schema-SSoT, eingecheckt).
 - **Strukturelle Vorlage:** `config/strategy.example.yaml` — zeigt das erwartete
-  Schema mit Beispielwerten. Dient als Template für `strategy.yaml`, ist selbst
-  aber keine Strategie.
+  Schema mit Beispielwerten. Dient als Template, ist selbst aber keine Strategie.
+- **Schema-SSoT:** `config/strategy.schema.yaml` — einziges autoritatives Schema
+  für Setup, Validierung, Analyse und Doku (fail-closed bei unbekannten Feldern).
+- **Menschenlesbare Governance-Strategie:** `strategy/strategy.md` + Version/Hash
+  in `strategy/strategy-version.txt` (beide **nicht versioniert** — persönliche
+  Werte, gitignored; lokal generiert per
+  `scripts/render_strategy_doc.py --write`).
 
 ## 2. Strategie als read-only Input
 
 Die Pipeline behandelt `config/strategy.yaml` als **read-only Input**:
 
-- Sie wird **nicht erzeugt** und **nicht modifiziert** — Strategieentwicklung
-  erfolgt in einer separaten Session (außerhalb dieses Projekts).
+- Sie wird **nicht modifiziert** — sie wird ausschließlich deterministisch über
+  `scripts/setup_strategy.py --emit` (aus `config/setup/answers.reviewed.yaml`)
+  erzeugt. Die Pipeline selbst erzeugt oder verändert sie nie.
 - Sie wird bei jedem produktiven Lauf neu geladen und schema-validiert
   (`analyze.load_strategy()` → `analyze.validate_strategy()`).
 - Sie fließt unverändert ins Faktenpaket (`facts.build_facts_package`, Feld
@@ -39,22 +49,24 @@ Die Pipeline behandelt `config/strategy.yaml` als **read-only Input**:
 
 ## 3. Erwartetes YAML-Schema
 
-Das Schema ist **pipeline-fixed** (in `scripts/analyze.py`, `STRATEGY_SCHEMA`):
-Es definiert, welche Top-Level-Blöcke existieren dürfen und welche required sind.
-Es legt keine Werte fest — die Werte kommen ausschließlich aus `strategy.yaml`.
-Unbekannte Felder werden **ignoriert** (permissive), nur required-Blöcke und
-Validierungsregeln greifen.
+Das Schema ist die **Single Source of Truth** in `config/strategy.schema.yaml`
+(eingecheckt, NICHT gitignored; öffentliche Vorlage für Werte:
+`config/strategy.example.yaml`). Es wird von Setup, Validierung, Analyse und
+Doku gemeinsam geladen — es gibt kein separates `STRATEGY_SCHEMA` mehr im Code.
+Unbekannte Felder schlagen **fehl** (fail-closed), sie werden nicht mehr still
+ignoriert. Das Schema definiert Felder, Typen, Required/Optional und
+Mapping-Status (analyserelevant / dokumentationsrelevant / bewusst informativ).
 
 | Top-Level-Block | Required | Felder (bekannt) | Typen |
 |---|---|---|---|
 | `meta` | nein | `version`, `created`, `last_reviewed`, `next_review`, `cooling_off_days` | int / date (`YYYY-MM-DD`) |
-| `investor` | nein | `horizon`, `income_source`, `purpose`, `risk_profile` | str |
+| `investor` | nein | `horizon`, `income_source`, `purpose`, `monthly_savings_eur`, `experience_years`, `leverage`, `check_frequency`, `external_provision`, `personal_context` | str / int / enum / list |
 | `portfolio` | **ja** | `core_pct`, `satellite_pct`, `core_description`, `rebalancing` | siehe unten |
-| `satellite_limits` | **ja** | `max_position_pct`, `max_sector_pct`, `max_positions`, `max_turnover_annual_pct`, `max_trades_per_quarter` | siehe unten |
+| `satellite_limits` | **ja** | `target_position_pct`, `warn_position_pct`, `max_position_pct`, `max_sector_pct`, `max_positions`, `max_turnover_annual_pct`, `max_trades_per_quarter` | siehe unten |
 | `sectors` | nein | `preferred`, `excluded`, `notes` | list[str] / str |
 | `regions` | nein | `core`, `satellite_restriction` | str |
 | `thesis` | nein | `required`, `template` | bool / str |
-| `alerts` | nein | frei (kein festes Feldschema) | bool / int / float |
+| `alerts` | nein | `on_thesis_expiring_soon_days` | int |
 | `review_schedule` | nein | `quarterly_strategy_review`, `annual_full_review`, `triggers` | bool / list[str] |
 
 ### Felder im Detail
@@ -141,14 +153,17 @@ lösen keine Checks aus.
 ## 5. Validierung
 
 Vor jeder Verwendung wird `strategy.yaml` schema-validiert
-(`analyze.validate_strategy`, `STRATEGY_SCHEMA`):
+(`analyze.validate_strategy`, Schema aus `config/strategy.schema.yaml`):
 
 1. `portfolio` und `satellite_limits` müssen existieren (required — ohne sie
    können keine Checks laufen).
 2. `core_pct + satellite_pct == 100`.
 3. `max_position_pct <= max_sector_pct`.
-4. `max_positions >= 1`.
-5. Typ-Prüfung: Prozentwerte `int|float`, `max_positions` `int`, Listen sind Listen.
+4. `max_positions >= 1`, `max_trades_per_quarter >= 1`.
+5. Typ-Prüfung: Prozentwerte `int|float`, `max_positions`/`max_trades_per_quarter` `int`,
+   Listen sind Listen, Datumsfelder `YYYY-MM-DD`.
+6. **Fail-closed:** unbekannte Sektionen/Felder erzeugen einen Fehler
+   (kein stilles Ignorieren mehr).
 
 Ergebnis: `{"valid": True, "errors": []}` oder `{"valid": False, "errors": [str, ...]}`.
 
@@ -216,13 +231,54 @@ Wird `strategy.yaml` gegenüber dem Vorgänger-Snapshot geändert:
 4. Der nächste Lauf vergleicht gegen den neuen Stand — die Änderung wird nur
    einmal als solche berichtet.
 
-## 9. Abgrenzung / Nicht dokumentiert
+## 9. Datenqualitätsregeln (SUSE-Regel + 6-Monats-Performance)
+
+### Unbewertete Positionen (z.B. SUSE / LU2722255754)
+
+Eine Position ohne Bewertung (`valuation: null` / fehlendes `value_eur`) ist ein
+**echtes Datenproblem** und wird nicht still gelöscht und nicht mit 0 bewertet:
+
+1. Holding ohne `value_eur`/`valuation` → Status `incomplete`, Issue
+   `Holding <ISIN>: kein Bewertungswert (valuation null) — Wert unvollständig, Position bleibt mit Kategorie unknown und Gewicht 0 im Positionsreport, wird aber explizit als "unbewertet" ausgewiesen`.
+2. Es ist verboten, die Position aus der Holdings-Liste zu entfernen.
+3. Es ist verboten, einen künstlichen Wert (0, Schätzwert) einzusetzen — das
+   Gewicht bleibt 0, `category: unknown`.
+4. Der Gesamtwert wird nur aggregiert, wenn jede Holding einen EUR-Wert hat;
+   fehlt einer, wird der Gesamtwert als unvollständig markiert (fail-closed).
+5. Die Regel ist testbar verankert (Position bleibt erhalten, keine 0-Bewertung,
+   keine Löschung).
+
+### 6-Monats-Performance (`position_perf_6m_pct`)
+
+- Kein Setup-Feld, sondern ein **Briefing-Datenfeld** pro ISIN (absolute
+  Performance über die letzten 6 Monate, aus Kursdaten/Snapshots). Kein
+  Benchmark.
+- **Fail-closed:** Fehlt `position_perf_6m_pct` für eine ISIN, wird aus der
+  Performance-Regel **kein SELL/REDUCE** abgeleitet; die Position erscheint in
+  der Datenqualität als `incomplete` („6-Monats-Performance fehlt").
+- Die Regel („negativ über 6 Monate = dauerhaft schlecht") stützt
+  Reduktions-/Verkaufsvorschläge nur, wenn andere Trigger vorhanden sind.
+
+### Ampel & Gesamt-Empfehlung (Briefing, §6a)
+
+Sieben verbindliche Kategorien (`core_satellite`, `sector_concentration`,
+`single_position`, `thesis_deadlines`, `turnover`, `trades_per_quarter`,
+`data_quality`) mit Ampel grün/gelb/rot. Die Gesamt-Empfehlung wird
+deterministisch abgeleitet: SELL bei ≥4 von 7 rot, BUY bei ≥4 von 7 grün +
+Sparrate > 0, sonst WATCH. Details: `strategy/strategy.md` (Governance) und
+`README.md`.
+
+## 10. Abgrenzung / Nicht dokumentiert
 
 - **Nicht dokumentiert hier:** konkrete Strategiewerte, Governance-Regeln
   (Cooling-off, Review-Trigger), der dialogische Entwicklungsprozess,
   Anlageberatung. Diese Themen gehören in die Strategie-Session bzw. in
   `config/strategy.yaml` (persönlich, gitignored).
-- **Strategieentwicklung** erfolgt in einer separaten Session; dieses
-  Implementierungsprojekt erzeugt oder verändert keine Strategie.
-- Die strategische Single Source of Truth für Werte ist die Strategie-Session;
-  `docs/strategy.md` ist ausschließlich die technische Schnittstellen-Doku.
+- **Strategieentwicklung** erfolgt über den deterministischen Setup-Flow
+  (`scripts/setup_strategy.py`, 15-Fragen-Flow → `config/setup/answers.reviewed.yaml`
+  → Emission mit Backup); die Pipeline behandelt `strategy.yaml` weiterhin als
+  read-only Input.
+- Die strategische Single Source of Truth für Werte ist `strategy/strategy.md`
+  (menschenlesbare Governance-Strategie, deterministisch generiert, **lokal,
+  nicht versioniert** — gitignored, persönliche Werte);
+  `docs/strategy-interface.md` ist ausschließlich die technische Schnittstellen-Doku.

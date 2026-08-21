@@ -1,0 +1,7 @@
+[
+  {"isin": "US5949724083", "name": "NVIDIA Corp.", "ticker": "NVDA", "quantity": 0, "valuation": 1250.0, "valuation_currency": "EUR", "sector": "technology"},
+  {"isin": "DE000A3E00M1", "name": "IONOS Group SE", "ticker": "IOS", "quantity": 0, "valuation": null, "valuation_currency": null, "sector": "technology"},
+  {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World UCITS ETF", "quantity": 0, "valuation": 5000.0, "valuation_currency": "EUR"},
+  {"isin": "LU2722255754", "name": "SUSE", "quantity": 0, "valuation": null, "valuation_currency": null, "sector": "software"},
+  {"isin": "US88579Y1010", "name": "3M Co.", "ticker": "MMM", "quantity": 0, "valuation": 800.0, "valuation_currency": "EUR", "sector": "industrials"}
+]

@@ -24,7 +24,12 @@ from pathlib import Path
 
 from scripts import analyze
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Plan §9: SCHEMA_VERSION auf 2 erhoeht (normalisiertes Transaktionsschema).
+# Bestehende Snapshots (Version 1) werden weiterhin gelesen, aber als alt
+# markiert: build_snapshot schreibt 2, read_snapshot akzeptiert beide Versionen.
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
@@ -81,6 +86,8 @@ def read_snapshot(path: Path) -> dict | None:
     """Sicherer Leseversuch: fehlend/korrupt/falsche Schema-Version -> None.
 
     Wirft nie; laesst unbekannte Inhalte unbearbeitet (kein Logging).
+    Akzeptiert Schema-Version 1 (alt, unnormalisierte Transaktionen) und 2
+    (aktuell, normalisierte Transaktionen); unbekannte Versionen -> None.
     """
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -88,7 +95,7 @@ def read_snapshot(path: Path) -> dict | None:
         return None
     if not isinstance(raw, dict):
         return None
-    if raw.get("schema_version") != SCHEMA_VERSION:
+    if raw.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
         return None
     return raw
 

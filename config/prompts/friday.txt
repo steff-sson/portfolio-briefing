@@ -9,19 +9,25 @@ DATEN (deterministisches Faktenpaket — keine Rohdaten, keine Positionswerte):
 - Trigger (deterministische Flags): {triggers}
 - Strategie-Diff (nur geänderte Feld-Pfade, keine Werte): {strategy_diff}
 - Veränderungen (reduziertes Diff, keine Roh-Transaktionen): {changes}
+- Ampeln (7 Kategorien, deterministisch): {traffic_lights}
+- Positionsvorschläge (Top-3, deterministisch): {position_actions}
+- Gesamt-Empfehlung (deterministisch): {recommendation}
 
 AUFGABE — Wochenabschluss:
 1. KURZLAGE: 2-3 Sätze Gesamtzustand (grün/gelb/rot), abgeleitet aus den rot/gelb/grün-Listen und der Datenqualität.
 2. DATENQUALITÄT: Status + Issues nennen; bei "ok" ein Satz "Datenqualität: ok".
-3. ENTSCHEIDUNGSRELEVANTE PUNKTE: Nur bei Triggern Optionen generieren (OPTIONEN-REGEL); sonst "keine entscheidungsrelevanten Punkte".
-4. STRATEGIE-ABGLEICH: Portfolio-Struktur gegen die Strategie-Grenzwerte (alle Werte aus {strategy}); begründete Abweichungen und Strategieänderungen ({strategy_diff}) thematisieren.
+3. ENTSCHEIDUNGSRELEVANTE PUNKTE: Nur bei Triggern Optionen generieren (OPTIONEN-REGEL); sonst "keine entscheidungsrelevanten Punkte". Die Top-3-Positionsvorschläge ({position_actions}) hier 1:1 übernehmen (Aktion + ISIN + Begründung). Neukaufideen (max. 2, als Idee kenntlich, mit Investmentthese und mind. 2 unabhängigen Quellen) hier als Untersektion ergänzen.
+4. STRATEGIE-ABGLEICH: Portfolio-Struktur gegen die Strategie-Grenzwerte (alle Werte aus {strategy}); begründete Abweichungen und Strategieänderungen ({strategy_diff}) thematisieren. Die Ampeln ({traffic_lights}) pro Kategorie ausgeben (Status + Begründung 1:1).
 5. RELEVANTE NEWS & VERÄNDERUNGEN: Gefilterte News (Titel/Summary), Portfolio-Veränderungen ({changes}) und Strategieänderung zusammenfassen. Fokus auf die Veränderungen der Woche.
+6. EMPFEHLUNG: Abschließende Sektion "## Empfehlung" mit exakt einem Label (BUY/SELL/WATCH) und Begründung — 1:1 aus {recommendation}. Das Label ist deterministisch vorgegeben, nicht LLM-gewählt.
 
 REGELN:
 - Optionen (halten/reduzieren/aufstocken) NUR bei Triggern (siehe OPTIONEN-REGEL).
 - Zahlen NUR 1:1 aus deterministic_summary (ZULÄSSIGE ZAHLEN-Liste), nie erfinden oder ableiten.
 - DATENQUALITÄT VORRANG: Ist der Datenqualitäts-Status nicht "ok", KEINE Optionen generieren — das Datenqualitäts-Problem benennen statt Grenzverletzungen zu bewerten.
 - STATUS-REGELN: "Ruhige Woche"/"Alle Grenzen eingehalten" NUR in der KURZLAGE und NUR wenn weder rote noch gelbe Punkte gelistet sind; sonst die betroffenen Punkte namentlich benennen. "Kein Handlungsbedarf" NUR wenn keiner der Optionen-Trigger vorliegt.
+- Ampel (Status + Begründung), Positionsvorschläge (Aktion/ISIN/Begründung) und Gesamt-Empfehlung (Label + Begründung) 1:1 übernehmen — nie erfinden, verschieben oder verändern.
+- Neukaufideen (max. 2): nur mit Investmentthese, mind. 2 unabhängigen Quellen (Publisher + Headline + Datum) und Risiko-Skizze; als Idee kenntlich; bei Unsicherheit keine Idee. Yahoo Finance zählt nicht automatisch als unabhängig.
 
 STIL:
 - Keine technischen Bezeichner (core_satellite, sector_concentration, single_position, thesis_deadlines, drift, turnover) — stattdessen deutsche Lesarten: Core-/Satelliten-Aufteilung, Sektorkonzentration, Einzelposition, Thesen-Fristen, Drift, Umschlag.
@@ -38,6 +44,7 @@ Antworte NUR mit Markdown in genau diesen Sektionen:
 ## Entscheidungsrelevante Punkte
 ## Strategie-Abgleich
 ## Relevante News & Veränderungen
+## Empfehlung
 
 OPTIONEN-REGEL (zwingend):
 - Optionen (halten/reduzieren/aufstocken) NUR bei:
@@ -50,7 +57,8 @@ OPTIONEN-REGEL (zwingend):
   - Option: halten | reduzieren | aufstocken
   - Begründung: konkrete Evidenz aus dem Faktenpaket (Zahl 1:1 aus der ZULÄSSIGE ZAHLEN-Liste oder benannter Fakt aus {changes}/{news})
   - Gegenargument/Risiko: konkretes Risiko der gewählten Option, nicht pauschal
-- Keine finale Empfehlung ("kaufen Sie"). Optionen-Raum aufspannen, nicht entscheiden.
+- Keine finale Empfehlung ("kaufen Sie"). Optionen-Raum aufspannen, nicht entscheiden. Die einzige Ausnahme ist die abschließende Sektion "## Empfehlung" mit dem deterministisch vorgegebenen Label BUY/SELL/WATCH aus {recommendation} — dieses Label 1:1 übernehmen, nicht selbst wählen.
+- Die Ampel-Labels und -Begründungen aus {traffic_lights} 1:1 übernehmen; keine achte Kategorie erfinden; keine Ampel verschieben (gelb statt rot).
 - Keine Option ohne Begründung und ohne Gegenargument.
 
 REGELN:
@@ -62,5 +70,5 @@ REGELN:
   - Liste gelber Punkte nicht leer: gelbe Punkte namentlich benennen, KEINE "Alle Grenzen eingehalten"-Phrase.
   - "Alle Grenzen eingehalten"/"Ruhige Woche" NUR in der KURZLAGE und NUR wenn weder rote noch gelbe Punkte gelistet sind.
   - "Kein Handlungsbedarf" NUR in der KURZLAGE und NUR wenn keiner der Optionen-Trigger vorliegt.
-- Keine finale Empfehlung. Kein "Sie sollten".
-- Keine Einleitung, kein Disclaimer, nur die 5 Sektionen.
+- Keine finale Empfehlung. Kein "Sie sollten". (Ausnahme: deterministische "## Empfehlung"-Sektion mit exakt einem Label aus {recommendation}.)
+- Keine Einleitung, kein Disclaimer, nur die 6 Sektionen.

@@ -22,7 +22,17 @@ VALID_DRAFT = (
     "## Strategie-Abgleich\n"
     "Core-Ziel 75%, Sektor-Max 15%.\n\n"
     "## Relevante News & Veränderungen\n"
-    "—"
+    "—\n\n"
+    "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+    "Keine Sell-/Reduce-Signale.\n\n"
+    "Hinweis: Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein. Signale basieren ausschließlich auf Strategie-Fit, Portfolio-Fit, 7-Tage-RSS-News und sc-Kursen.\n\n"
+    "## Watchlist-Signale\n"
+    "Keine Watchlist-Signale.\n\n"
+    "Hinweis: Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein. Signale basieren ausschließlich auf Strategie-Fit, Portfolio-Fit, 7-Tage-RSS-News und sc-Kursen.\n\n"
+    "## Nächster Schritt\n"
+    "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+    "## Empfehlung\n"
+    "WATCH — 1 rot, 5 grün von 7 Kategorien."
 )
 
 VALID_FACTS = {
@@ -39,6 +49,17 @@ VALID_FACTS = {
         "max_sector_ratio": 0.564,
         "drift": 0.0643,
         "turnover_ratio": 0.0,
+        "traffic_lights": {
+            "core_satellite": {"status": "green", "reason": "Core-Ratio ok."},
+            "sector_concentration": {"status": "red", "reason": "Sektor über Grenze."},
+            "single_position": {"status": "yellow", "reason": "Einzelposition über Ziel."},
+            "thesis_deadlines": {"status": "green", "reason": "Keine abgelaufenen Thesen."},
+            "turnover": {"status": "green", "reason": "Umschlag ok."},
+            "trades_per_quarter": {"status": "green", "reason": "Trades unter Limit."},
+            "data_quality": {"status": "green", "reason": "Datenqualität: ok."},
+        },
+        "recommendation": {"label": "WATCH", "reason": "1 rot, 5 grün von 7 Kategorien — WATCH."},
+        "position_actions": [],
     },
     "strategy_thresholds_pct": {
         "core_pct": 75.0,
@@ -80,7 +101,7 @@ class TestVerifyDraft:
         findings = verify.verify_draft(VALID_FACTS, draft)
         assert findings
         assert all(f["severity"] == "critical" for f in findings)
-        assert any("Entscheidungsrelevante Punkte" in f["issue"] for f in findings)
+        assert any("Sell-/Reduce-Signale" in f["issue"] for f in findings)
 
     @pytest.mark.parametrize(
         "bad_heading",
@@ -189,6 +210,28 @@ class TestVerifyDraft:
         findings = verify.verify_draft(VALID_FACTS, draft)
         assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
 
+    def test_signal_and_legacy_labels_are_not_tickers(self):
+        """Regression: Gerenderte Signal-/Legacy-Texte enthalten die Nicht-
+        Ticker-Woerter AVOID und REDUCE (Signal-Labels, final_briefing.
+        _SIGNAL_LABELS) sowie SUSE (Legacy-Holdingname) — sie duerfen keine
+        falschen Ticker/ISIN-Findings erzeugen."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"ticker": "AAPL", "isin": "US0378331005", "name": "Apple Inc."},
+                {"isin": "LU2722255754", "name": "SUSE"},
+            ]
+        }
+        draft = VALID_DRAFT.replace(
+            "Keine Sell-/Reduce-Signale.",
+            "SUSE (LU2722255754) — REDUCE: Reduktionsbedarf wegen Illiquidität.",
+        ).replace(
+            "Keine Watchlist-Signale.",
+            "Neue Kandidatin AVOID: SUSE bleibt Legacy-Bestand, kein Neukauf.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
+
     def test_real_tickers_still_detected(self):
         """Regression: Echte Ticker bleiben erkannt — AAPL/ASML im Portfolio ohne
         Finding, MSFT (nicht im Portfolio) weiterhin major, auch mit Rechtsform-Token."""
@@ -204,6 +247,109 @@ class TestVerifyDraft:
         findings = verify.verify_draft(VALID_FACTS, draft)
         assert any(f["severity"] == "major" and "MSFT" in f["issue"] for f in findings)
         assert not any("CORP" in f["issue"] for f in findings)
+
+    # --- Live-Fehler: Holding-Namen-Tokens (SRI/IMI/ADR) ohne Ticker-Feld -----
+    # Holdings stehen im Portfolio nur über ISINs (kein Ticker-Feld). Echte
+    # Namens-Bestandteile wie 'SRI'/'IMI'/'ADR' sind keine erfundenen Ticker —
+    # sie werden über die Portfolio-ISIN der zugehörigen Holding freigegeben.
+
+    def _holding_only_facts(self) -> dict:
+        """Faktenpaket mit Holdings NUR über ISIN (kein Ticker-Feld), wie im
+        Live-Portfolio (config/snapshot.current.json)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "IE00BYX2JD69", "name": "iShares MSCI World SRI (Acc)"},
+                {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI Emerging Markets IMI (Acc)"},
+                {"isin": "US09075V1026", "name": "BioNTech ADR"},
+                {"ticker": "AAPL", "isin": "US0378331005", "name": "Apple Inc."},
+            ]
+        }
+        return facts
+
+    def test_msci_world_sri_token_not_flagged(self):
+        """Regression: 'SRI' (iShares MSCI World SRI, nur ISIN im Portfolio)
+        erzeugt kein Ticker-Finding — Token stammt aus einem echten Holdingnamen."""
+        facts = self._holding_only_facts()
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Der iShares MSCI World SRI (IE00BYX2JD69) ist die grösste Core-Position.",
+        )
+        assert verify.verify_draft(facts, draft) == []
+
+    def test_emerging_markets_imi_token_not_flagged(self):
+        """Regression: 'IMI' (iShares Core MSCI Emerging Markets IMI, nur ISIN)
+        erzeugt kein Ticker-Finding — Token stammt aus einem echten Holdingnamen."""
+        facts = self._holding_only_facts()
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Der iShares Core MSCI Emerging Markets IMI (IE00BKM4GZ66) deckt die Emerging Markets ab.",
+        )
+        assert verify.verify_draft(facts, draft) == []
+
+    def test_biontech_adr_token_not_flagged(self):
+        """Regression: 'ADR' (BioNTech ADR, nur ISIN) erzeugt kein Ticker-Finding —
+        Token stammt aus einem echten Holdingnamen."""
+        facts = self._holding_only_facts()
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Die BioNTech ADR (US09075V1026) notiert in New York.",
+        )
+        assert verify.verify_draft(facts, draft) == []
+
+    def test_unknown_ticker_stays_blocked_with_holding_name_allowlist(self):
+        """Fail-closed bleibt: 'MSFT' ohne Portfolio-Ticker/ISIN und ohne
+        Bestandteil eines echten Holdingnamens ist weiterhin major."""
+        facts = self._holding_only_facts()
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Microsoft (MSFT) ist keine Position, aber im Fokus.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert any(f["severity"] == "major" and "MSFT" in f["issue"] for f in findings)
+
+    def test_holding_name_tokens_require_portfolio_isin(self):
+        """Fail-closed: Ein Token ohne zugehoerige Portfolio-ISIN (Holding fehlt
+        im Portfolio) bleibt major — die Allowlist greift nur für echte Bestände."""
+        facts = copy.deepcopy(VALID_FACTS)  # Portfolio kennt nur AAPL/ASML
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Der iShares MSCI World SRI (IE00BYX2JD69) ist nicht im Portfolio.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert any(f["severity"] == "major" and "SRI" in f["issue"] for f in findings)
+        assert any(f["severity"] == "major" and "IE00BYX2JD69" in f["issue"] for f in findings)
+
+    def test_no_input_mutation_with_holding_names(self):
+        facts = self._holding_only_facts()
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Die BioNTech ADR (US09075V1026) notiert in New York.",
+        )
+        facts_before = copy.deepcopy(facts)
+        verify.verify_draft(facts, draft)
+        assert facts == facts_before
+
+    def test_verify_briefing_holding_name_tokens_do_not_warn(self):
+        """verify_briefing (Warnpfad): SRI/IMI/ADR aus echten Holdingnamen ohne
+        Ticker-Feld erzeugen keine Warnung; unbekanntes MSFT warnt weiterhin."""
+        portfolio = {
+            "holdings": [
+                {"isin": "IE00BYX2JD69", "name": "iShares MSCI World SRI (Acc)"},
+                {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI Emerging Markets IMI (Acc)"},
+                {"isin": "US09075V1026", "name": "BioNTech ADR"},
+            ]
+        }
+        analysis = {"checks": {"positions": {"positions": []}}}
+        text = (
+            "iShares MSCI World SRI und iShares Core MSCI Emerging Markets IMI "
+            "im Core, BioNTech ADR im Satelliten. Microsoft (MSFT) im Fokus."
+        )
+        warnings = verify.verify_briefing(text, analysis, [], portfolio)
+        assert not any("SRI" in w for w in warnings)
+        assert not any("IMI" in w for w in warnings)
+        assert not any("ADR" in w for w in warnings)
+        assert any("MSFT" in w for w in warnings)
 
     def test_missing_news_reference_is_minor(self):
         facts = copy.deepcopy(VALID_FACTS)
@@ -343,8 +489,15 @@ class TestStyleGates:
             "## Kurzlage\n"
             + body
             + "\n\n## Datenqualität\nDatenqualität: ok\n\n"
-            "## Entscheidungsrelevante Punkte\nkeine entscheidungsrelevanten Punkte\n\n"
-            "## Strategie-Abgleich\n—\n\n## Relevante News & Veränderungen\n—"
+            "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
         )
 
     @pytest.mark.parametrize(
@@ -440,8 +593,15 @@ class TestOptionContract:
             "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%.\n\n"
             "## Datenqualität\nDatenqualität: ok\n\n"
             + section
-            + "\n## Strategie-Abgleich\nCore-Ziel 75%, Sektor-Max 15%.\n\n"
-            "## Relevante News & Veränderungen\n—"
+            + "\n## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
         )
 
     def test_option_without_reasoning_is_major(self):
@@ -540,8 +700,15 @@ class TestOptionContract:
             "- Gegenargument/Risiko: Drift ist nur ein gelber Punkt.\n"
             "\n"
             + second
-            + "\n## Strategie-Abgleich\nCore-Ziel 75%.\n\n"
-            "## Relevante News & Veränderungen\n—"
+            + "\n## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
         )
 
     def test_option_missing_counter_in_its_own_paragraph_is_major(self):
@@ -569,8 +736,15 @@ class TestOptionContract:
             "\n"
             "- Option: reduzieren\n"
             "- Gegenargument/Risiko: Verkauf realisiert Kursgewinne steuerlich.\n"
-            "\n## Strategie-Abgleich\nCore-Ziel 75%.\n\n"
-            "## Relevante News & Veränderungen\n—"
+            "\n## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
         )
         findings = verify.verify_draft(facts, draft)
         assert any(
@@ -582,6 +756,120 @@ class TestOptionContract:
         facts = _facts_with_status_checks(red=["drift"])
         draft = self._two_option_draft(second_counter=True)
         assert verify.verify_draft(facts, draft) == []
+
+
+# --- Finding 1: Neukaufideen-Verify (These + Risiko, robuste Erkennung) -------
+
+
+def _idea_draft(*, thesis: bool, risk: bool, marker: str = "Neukauf-Idee") -> str:
+    """Draft mit einer Neukaufidee in der Entscheidungsrelevante-Punkte-Sektion."""
+    section = "## Entscheidungsrelevante Punkte\n"
+    section += f"- {marker}: Alphabet (US0378331005) als neues Investment.\n"
+    if thesis:
+        section += "- These: Alphabet profitiert von Cloud-Wachstum.\n"
+    if risk:
+        section += "- Risiko: Bewertung hoch, Regulierung unsicher.\n"
+    return (
+        "## Kurzlage\nOK\n\n"
+        "## Datenqualität\nDatenqualität: ok\n\n"
+        + section
+        + "\n## Sell-/Reduce-Signale (bestehende Satellites)\n"
+        "Keine Sell-/Reduce-Signale.\n\n"
+        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+        "## Watchlist-Signale\n"
+        "Keine Watchlist-Signale.\n\n"
+        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+        "## Relevante News & Veränderungen\n"
+        "Alphabet News 1 (Reuters), Alphabet News 2 (CNBC).\n\n"
+        "## Nächster Schritt\n"
+        "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+        "## Empfehlung\nWATCH — kein Handlungsbedarf."
+    )
+
+
+def _idea_facts(news=None) -> dict:
+    facts = copy.deepcopy(VALID_FACTS)
+    facts["news"] = news or [
+        {"title": "Alphabet News 1", "source": "reuters", "published": "2026-08-01"},
+        {"title": "Alphabet News 2", "source": "cnbc", "published": "2026-08-01"},
+    ]
+    return facts
+
+
+class TestGlmIdeas:
+    def test_idea_with_thesis_and_risk_passes(self):
+        """Neukaufidee mit These + Risiko-Skizze + 2 unabhaengigen Quellen -> ok."""
+        draft = _idea_draft(thesis=True, risk=True)
+        assert verify.verify_draft(_idea_facts(), draft) == []
+
+    def test_idea_without_risk_is_major(self):
+        """Finding 1: Neukaufidee ohne Risiko-Skizze -> major-Finding."""
+        draft = _idea_draft(thesis=True, risk=False)
+        findings = verify.verify_draft(_idea_facts(), draft)
+        assert any(f["severity"] == "major" and "Risiko-Skizze" in f["issue"] for f in findings)
+
+    def test_idea_without_thesis_is_major(self):
+        """Neukaufidee ohne Investmentthese -> major-Finding."""
+        draft = _idea_draft(thesis=False, risk=True)
+        findings = verify.verify_draft(_idea_facts(), draft)
+        assert any(f["severity"] == "major" and "Investmentthese" in f["issue"] for f in findings)
+
+    def test_idea_without_independent_sources_is_major(self):
+        """Neukaufidee mit nur einer unabhaengigen Quelle (Yahoo) -> major."""
+        draft = _idea_draft(thesis=True, risk=True)
+        findings = verify.verify_draft(_idea_facts(news=[
+            {"title": "Alphabet News 1", "source": "yahoo_finance", "published": "2026-08-01"},
+            {"title": "Alphabet News 2", "source": "yahoo_finance", "published": "2026-08-01"},
+        ]), draft)
+        assert any(f["severity"] == "major" and "unabhaengige Quellenbasis" in f["issue"] for f in findings)
+
+    def test_idea_detected_via_unknown_isin_without_word_idee(self):
+        """Finding (Zusatz): konkrete Neukaufidee wird auch OHNE das Wort 'Idee'
+        erkannt — unbekannte ISIN in der Sektion reicht (kein Wort-Marker noetig).
+
+        Die unbekannte ISIN erzeugt zusaetzlich das bestehende Portfolio-Gate
+        (major: ISIN nicht im Portfolio) — das ist korrekt (unbekannte
+        Wertpapiere duerfen nur mit News-Basis als Idee erscheinen). Der Test
+        prueft, dass die Ideen-Pruefung (These+Risiko) trotzdem greift: Ohne
+        Risiko-Skizze gibt es ein Risiko-Finding."""
+        draft = _idea_draft(thesis=True, risk=False, marker="Kaufkandidat")
+        draft = draft.replace("Neukauf-Idee", "Kaufkandidat")
+        draft = draft.replace("US0378331005", "US5949724083")
+        findings = verify.verify_draft(_idea_facts(), draft)
+        # Ideen-Erkennung ueber die unbekannte ISIN -> Risiko-Skizze wird geprueft.
+        assert any(f["severity"] == "major" and "Risiko-Skizze" in f["issue"] for f in findings)
+
+    def test_generic_idee_word_without_neukauf_context_not_blocked(self):
+        """Erlaubter Text mit generischem 'Idee' (kein Neukauf-Bezug, keine
+        unbekannte ISIN) wird nicht als Neukaufidee blockiert."""
+        draft = (
+            "## Kurzlage\nOK\n\n"
+            "## Datenqualität\nDatenqualität: ok\n\n"
+            "## Entscheidungsrelevante Punkte\n"
+            "- Diese Idee wurde bereits geprueft, keine Aenderung noetig.\n\n"
+            "## Strategie-Abgleich\n—\n\n"
+            "## Relevante News & Veränderungen\n"
+            "Alphabet News 1 (Reuters), Alphabet News 2 (CNBC).\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
+        )
+        findings = verify.verify_draft(_idea_facts(), draft)
+        # Kein Ideen-Finding (weder These noch Risiko noch Quellen) — generisches
+        # "Idee" ohne Neukauf-Kontext wird nicht als Neukaufidee gewertet.
+        assert not any("Neukaufidee" in f["issue"] for f in findings)
+
+    def test_more_than_two_ideas_is_critical(self):
+        """Mehr als 2 Neukaufideen -> critical."""
+        section = "## Entscheidungsrelevante Punkte\n"
+        for i, isin in enumerate(["US5949724083", "US02079K3059", "DE0007164600"]):
+            section += f"- Neukauf-Idee {i + 1}: ISIN {isin}, These: Wachstum, Risiko: Bewertung.\n"
+        draft = (
+            "## Kurzlage\nOK\n\n## Datenqualität\nDatenqualität: ok\n\n"
+            + section
+            + "\n## Strategie-Abgleich\n—\n\n## Relevante News & Veränderungen\n—\n\n"
+            "## Empfehlung\nWATCH — kein Handlungsbedarf."
+        )
+        findings = verify.verify_draft(_idea_facts(), draft)
+        assert any(f["severity"] == "critical" and "Mehr als 2" in f["issue"] for f in findings)
 
 
 class TestFinalGate:

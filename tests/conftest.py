@@ -22,3 +22,9 @@ def portfolio() -> dict:
 @pytest.fixture
 def transactions() -> list:
     return json.loads((MOCK_DATA / "transactions.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def watchlist() -> list:
+    """Rohdaten aus tests/mock_data/watchlist.json (wie sie load_mock_watchlist liest)."""
+    return json.loads((MOCK_DATA / "watchlist.json").read_text(encoding="utf-8"))

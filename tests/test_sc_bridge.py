@@ -39,6 +39,232 @@ def test_load_mock_returns_mock_data(portfolio, transactions):
     assert loaded_portfolio["holdings"]
 
 
+# --- Watchlist: load_mock_watchlist (Dry-Run) + fetch_watchlist_from_sc (fail-closed) ---
+
+
+def test_load_mock_watchlist_returns_mock_data(watchlist):
+    """Mock-Watchlist wird wie der produktive Pfad normalisiert (value_eur/category ergaenzt)."""
+    loaded = sc_bridge.load_mock_watchlist()
+    assert len(loaded) == len(watchlist)
+    assert loaded[0]["isin"] == watchlist[0]["isin"]
+    assert loaded[0]["ticker"] == "NVDA"  # vorhandener Ticker bleibt
+    assert loaded[0]["value_eur"] == 1250.0  # EUR-valuation -> value_eur
+    assert loaded[0]["category"] == "unknown"  # ungemappt -> unknown
+    assert loaded[4]["ticker"] == "MMM"
+
+
+def test_load_mock_watchlist_missing_file_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(sc_bridge, "MOCK_WATCHLIST", tmp_path / "nope.json")
+
+    assert sc_bridge.load_mock_watchlist() == []
+
+
+def test_load_mock_watchlist_corrupt_returns_empty(monkeypatch, tmp_path):
+    corrupt = tmp_path / "watchlist.json"
+    corrupt.write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(sc_bridge, "MOCK_WATCHLIST", corrupt)
+
+    assert sc_bridge.load_mock_watchlist() == []
+
+
+def test_load_mock_watchlist_non_list_returns_empty(monkeypatch, tmp_path):
+    not_list = tmp_path / "watchlist.json"
+    not_list.write_text(json.dumps({"holdings": []}), encoding="utf-8")
+    monkeypatch.setattr(sc_bridge, "MOCK_WATCHLIST", not_list)
+
+    assert sc_bridge.load_mock_watchlist() == []
+
+
+def test_fetch_watchlist_legacy_list(monkeypatch, watchlist):
+    """Legacy-Format: direkte Liste. Items werden normalisiert (value_eur/category ergaenzt)."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    run, calls = _make_run(json.dumps(watchlist))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    got = sc_bridge.fetch_watchlist_from_sc()
+
+    assert len(got) == len(watchlist)
+    assert got[0]["isin"] == watchlist[0]["isin"]
+    assert got[0]["ticker"] == "NVDA"
+    assert got[0]["value_eur"] == 1250.0
+    assert calls == [["sc", "broker", "watchlist", "--json"]]
+
+
+def test_fetch_watchlist_empty_list_is_valid(monkeypatch):
+    """Leere Watchlist ist ein legitimer Zustand (kein ScEmptyDataError)."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    run, _ = _make_run(json.dumps([]))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    assert sc_bridge.fetch_watchlist_from_sc() == []
+
+
+def test_fetch_watchlist_wrapper_format(monkeypatch, watchlist):
+    """CLI-Wrapper-Format: Items kommen aus data.result.items."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    wrapper = {
+        "ok": True,
+        "command": "sc broker watchlist --json",
+        "data": {"result": {"count": len(watchlist), "items": watchlist}},
+    }
+    run, _ = _make_run(json.dumps(wrapper))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    got = sc_bridge.fetch_watchlist_from_sc()
+
+    assert len(got) == len(watchlist)
+    assert got[0]["isin"] == watchlist[0]["isin"]
+    assert got[0]["value_eur"] == 1250.0  # normalisiert
+    assert got[4]["ticker"] == "MMM"
+
+
+def test_fetch_watchlist_missing_sc_raises(monkeypatch):
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: False)
+
+    with pytest.raises(sc_bridge.ScNotAvailableError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+def test_fetch_watchlist_called_process_error_raises(monkeypatch):
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+
+    def _run_fails(cmd, *args, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(sc_bridge.subprocess, "run", _run_fails)
+
+    with pytest.raises(sc_bridge.ScCommandError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+def test_fetch_watchlist_invalid_json_raises(monkeypatch):
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    run, _ = _make_run("not json")
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    with pytest.raises(sc_bridge.ScInvalidJsonError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"ok": False, "command": "sc broker watchlist --json", "data": {"result": {"count": 0, "items": []}}}, id="ok-false"),
+        pytest.param({"ok": True, "command": "sc broker watchlist --json", "data": {"result": {}}}, id="items-missing"),
+        pytest.param({"ok": True, "command": "sc broker watchlist --json", "data": {"result": {"count": 1, "items": "not-a-list"}}}, id="items-not-list"),
+        pytest.param({"ok": True, "command": "sc broker watchlist --json", "data": "not-a-dict"}, id="data-not-dict"),
+        pytest.param({"ok": True, "command": "sc broker watchlist --json"}, id="data-missing"),
+    ],
+)
+def test_fetch_watchlist_invalid_wrapper_structure_raises(monkeypatch, payload):
+    """Ungueltige Wrapper-Struktur -> ScInvalidJsonError (fail-closed)."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    run, _ = _make_run(json.dumps(payload))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    with pytest.raises(sc_bridge.ScInvalidJsonError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+def test_fetch_watchlist_auth_error_raises_specific(monkeypatch):
+    """Auth-Marker in stderr -> spezifische Exception statt generischem ScCommandError."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    stderr = json.dumps({"ok": False, "error": {"code": "no_session", "message": "msg"}})
+    monkeypatch.setattr(sc_bridge.subprocess, "run", _run_fails_with_stderr(stderr))
+
+    with pytest.raises(sc_bridge.ScSessionExpiredError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+def test_fetch_watchlist_never_falls_back_to_mock(monkeypatch, watchlist):
+    """Regression: produktiver Abruf liefert NIE Mock-Daten — auch nicht bei sc-Ausfall."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: False)
+
+    with pytest.raises(sc_bridge.ScNotAvailableError):
+        sc_bridge.fetch_watchlist_from_sc()
+
+
+# --- Watchlist-Normalisierung (value_eur/category/ticker, idempotent) ---
+
+
+def test_normalize_watchlist_valuation_eur_becomes_value_eur():
+    """Echtes sc-Schema: EUR-valuation -> value_eur, Rohdaten bleiben erhalten."""
+    item = sc_bridge._normalize_watchlist_item(
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "quantity": 0, "valuation": 1250.0, "valuation_currency": "EUR"},
+        {},
+    )
+    assert item["value_eur"] == 1250.0
+    assert item["valuation_currency"] == "EUR"
+
+
+def test_normalize_watchlist_unmapped_is_unknown_not_satellite():
+    """Nicht gemappter Einzelwert -> explizit "unknown", nie stillschweigend satellite."""
+    item = sc_bridge._normalize_watchlist_item({"isin": "US5949724083"}, {})
+    assert item["category"] == "unknown"
+    assert item["ticker"] == ""
+
+
+def test_normalize_watchlist_lookup_category_by_isin():
+    """Gemappter ETF -> category aus config/etf_lookup.json (ISIN)."""
+    item = sc_bridge._normalize_watchlist_item(
+        {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "valuation": 5000.0, "valuation_currency": "EUR"},
+        {"IE00BK5BQT80": {"name": "Vanguard FTSE All-World UCITS ETF", "sector": "Diversified", "category": "core"}},
+    )
+    assert item["category"] == "core"  # Lookup-Mapping
+    assert item["value_eur"] == 5000.0
+
+
+def test_normalize_watchlist_existing_fields_kept():
+    """Vorhandene Felder (ticker/category/value_eur) haben Vorrang — idempotent."""
+    item = sc_bridge._normalize_watchlist_item(
+        {"isin": "US5949724083", "ticker": "NVDA", "category": "satellite", "value_eur": 12.0, "valuation": 999.0, "valuation_currency": "EUR"},
+        {},
+    )
+    assert item["value_eur"] == 12.0
+    assert item["category"] == "satellite"
+    assert item["ticker"] == "NVDA"
+
+
+def test_normalize_watchlist_non_eur_valuation_has_no_value_eur():
+    """valuation in Fremdwaehrung -> KEIN value_eur (keine falsche EUR-Behauptung)."""
+    item = sc_bridge._normalize_watchlist_item({"isin": "US0378331005", "valuation": 300.0, "valuation_currency": "USD"}, {})
+    assert "value_eur" not in item
+
+
+def test_normalize_watchlist_null_valuation_has_no_value_eur():
+    """valuation null (fehlendes Quote) -> kein value_eur, category unknown."""
+    item = sc_bridge._normalize_watchlist_item(
+        {"isin": "LU2722255754", "valuation": None, "valuation_currency": None},
+        {},
+    )
+    assert "value_eur" not in item
+    assert item["category"] == "unknown"
+
+
+def test_fetch_watchlist_wrapper_normalizes_real_schema(monkeypatch):
+    """Wrapper-Format mit echtem sc-Schema: value_eur/category/ticker zentral normalisiert."""
+    monkeypatch.setattr(sc_bridge, "_sc_available", lambda: True)
+    items = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "quantity": 0, "valuation": 5000.0, "valuation_currency": "EUR"},
+        {"isin": "US0378331005", "name": "Apple Inc.", "quantity": 0, "valuation": 2400.0, "valuation_currency": "EUR"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "ticker": "NVDA", "quantity": 0, "valuation": None, "valuation_currency": None},
+    ]
+    wrapper = {"ok": True, "command": "sc broker watchlist --json", "data": {"result": {"count": 3, "items": items}}}
+    run, _ = _make_run(json.dumps(wrapper))
+    monkeypatch.setattr(sc_bridge.subprocess, "run", run)
+
+    got = sc_bridge.fetch_watchlist_from_sc()
+
+    by_isin = {i["isin"]: i for i in got}
+    assert by_isin["IE00BK5BQT80"]["value_eur"] == 5000.0
+    assert by_isin["IE00BK5BQT80"]["category"] == "core"  # Lookup-Mapping
+    assert by_isin["US0378331005"]["value_eur"] == 2400.0
+    assert by_isin["US0378331005"]["category"] == "unknown"  # ungemappt
+    assert "value_eur" not in by_isin["US5949724083"]  # null-valuation -> kein value_eur
+    assert by_isin["US5949724083"]["ticker"] == "NVDA"  # vorhandener Ticker bleibt
+    assert "ticker" in by_isin["IE00BK5BQT80"] and by_isin["IE00BK5BQT80"]["ticker"] == ""  # fehlender Ticker -> ""
+
+
 # --- refresh_from_sc: produktiver Live-Abruf, fail-closed, kein Mock-Fallback ---
 
 

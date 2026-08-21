@@ -71,7 +71,7 @@ Du bist ein sokratischer Moderator für ein Portfolio-Setup. Dein Ziel ist es, d
 
 ## Output am Ende
 
-Nach Frage 15: Erstelle eine strukturierte Zusammenfassung aller Antworten im Format einer Checkliste. Markiere Unklarheiten und offene Punkte. Die Zusammenfassung dient als Input für den `setup_generate.txt` Prompt.
+Nach Frage 15: Erstelle eine strukturierte Zusammenfassung aller Antworten im Format einer Checkliste. Markiere Unklarheiten und offene Punkte. Die Zusammenfassung dient als Input für die persistierte Antwortdatei `config/setup/answers.yaml` (Feld je Antwort, siehe `config/strategy.schema.yaml` für Feldnamen und Mapping-Status). Der anschließende Review-/Validierungs-/Emissionsschritt läuft deterministisch über `scripts/setup_strategy.py` — du setzt keine Fachwerte, kein YAML-Generator.
 
 ## Disclaimer
 

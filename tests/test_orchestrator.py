@@ -14,6 +14,7 @@ from scripts import (
     diff,
     facts,
     filter_news,
+    final_briefing,
     llm_briefing,
     llm_review,
     llm_revise,
@@ -27,18 +28,22 @@ from scripts import (
 EMPTY_STRATEGY = {"strategy": {}}
 EMPTY_ANALYSIS = {"checks": {}}
 
-# Valid Draft: alle 5 Pflichtsektionen des Output-Contracts, keine Zahlen.
+# Valid Draft: alle Pflichtsektionen des Output-Contracts, keine Zahlen.
 VALID_DRAFT = (
     "## Kurzlage\n"
     "Apple (AAPL) konform.\n\n"
     "## Datenqualität\n"
     "—\n\n"
-    "## Entscheidungsrelevante Punkte\n"
-    "—\n\n"
-    "## Strategie-Abgleich\n"
-    "—\n\n"
-    "## Relevante News & Veränderungen\n"
-    "—"
+    "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+    "Keine Sell-/Reduce-Signale.\n\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+    "## Watchlist-Signale\n"
+    "Keine Watchlist-Signale.\n\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+    "## Nächster Schritt\n"
+    "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+    "## Empfehlung\n"
+    "WATCH — kein Handlungsbedarf."
 )
 PASS_REVIEW = {"findings": [], "overall_verdict": "pass"}
 REVISE_REVIEW = {
@@ -86,6 +91,8 @@ def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions, news=None) ->
     monkeypatch.setattr(snapshot, "discard_staged", _discard_staged)
     monkeypatch.setattr(sc_bridge, "refresh_from_sc", lambda: (portfolio, transactions))
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (portfolio, transactions))
+    monkeypatch.setattr(sc_bridge, "fetch_watchlist_from_sc", lambda: [])
+    monkeypatch.setattr(sc_bridge, "load_mock_watchlist", lambda: [])
     monkeypatch.setattr(analyze, "load_strategy", lambda: EMPTY_STRATEGY)
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: news or [])
@@ -171,12 +178,27 @@ def test_missing_review_key_is_fail_closed(monkeypatch, tmp_path, portfolio, tra
 
 
 def test_major_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transactions):
-    """Major Verify-Finding (unbekannter Ticker) blockt Versand trotz Pass-Review."""
+    """Major Verify-Finding (unbekannter Ticker im GERENDERTEN Text) blockt
+    Versand trotz Pass-Review. Der produktive Pfad prueft seit Teil 2 den
+    gerenderten Text (final_briefing.render_final_briefing), nicht den
+    rohen LLM-Draft."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    bad_draft = VALID_DRAFT.replace("AAPL", "MSFT")  # MSFT nicht im Portfolio
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": bad_draft)
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+
+    def _bad_render(facts_package, mode="monday"):
+        # Gerenderter Text enthaelt einen Ticker, den das Portfolio nicht kennt.
+        # Kurzer Output-Contract (Phase 5): keine '## Empfehlung'-Sektion mehr —
+        # den unbekannten Ticker ans Ende der Kurzlage (vor der naechsten
+        # Sektion) haengen, die verify gegen das Portfolio prueft.
+        return final_briefing.render_final_briefing(facts_package, mode=mode).replace(
+            "## Datenqualität",
+            "MSFT (MSFT) im Fokus — Empfehlung: nicht bestimmbar.\n\n## Datenqualität",
+            1,
+        )
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _bad_render)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -187,12 +209,18 @@ def test_major_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transacti
 
 
 def test_critical_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transactions):
-    """Critical Verify-Finding (fehlende Sektion) blockt Versand trotz Pass-Review."""
+    """Critical Verify-Finding (fehlende Sektion im GERENDERTEN Text) blockt
+    Versand trotz Pass-Review (Teil 2: verify prueft den gerenderten Text)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    broken_draft = "## Kurzlage\nOK"  # nur 1 von 5 Sektionen
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": broken_draft)
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+
+    def _broken_render(facts_package, mode="monday"):
+        # Nur 1 von 6 Sektionen -> verify findet critical (fehlende Sektion).
+        return "## Kurzlage\nOK"
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _broken_render)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -215,6 +243,113 @@ def test_minor_verify_finding_does_not_block(monkeypatch, tmp_path, portfolio, t
 
     assert rc == 0
     assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+# --- Teil 2: final_briefing-Hook im Orchestrator ------------------------------
+# Der produktive Pfad rendert nach dem LLM-Draft (und nach jeder Revision) via
+# final_briefing.render_final_briefing und prueft ab da den GERENDERTEN Text.
+# Der Dry-Run-Pfad bleibt unveraendert (_dry_run_placeholder, kein Render).
+
+
+def test_final_render_hook_runs_after_draft(monkeypatch, tmp_path, portfolio, transactions):
+    """Produktiver Lauf: render_final_briefing wird nach dem Draft genau einmal
+    aufgerufen, verify/review sehen den GERENDERTEN Text, Versand rc 0."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    seen = {}
+    render_calls = {"n": 0}
+    real_render = final_briefing.render_final_briefing
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: seen.update(reviewed=draft) or PASS_REVIEW)
+
+    def _render(facts_package, mode="monday"):
+        render_calls["n"] += 1
+        out = real_render(facts_package, mode=mode)
+        seen["rendered"] = out
+        return out
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _render)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert render_calls["n"] == 1  # genau ein Render nach dem Draft
+    assert seen["reviewed"] == seen["rendered"]  # Review prueft den gerenderten Text
+    assert "# Portfolio-Briefing — Montag" in seen["rendered"]
+    assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+def test_final_render_hook_runs_again_after_revision(monkeypatch, tmp_path, portfolio, transactions):
+    """Nach einer Revision wird erneut gerendert (Teil 2): verify/review des
+    zweiten Durchgangs pruefen den RE-RENDERTEN Text, nicht den rohen
+    Revise-Output."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    seen = []
+    render_calls = {"n": 0}
+    real_render = final_briefing.render_final_briefing
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: seen.append(draft) or (PASS_REVIEW if len(seen) > 1 else REVISE_REVIEW))
+    monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: VALID_DRAFT)
+
+    def _render(facts_package, mode="monday"):
+        render_calls["n"] += 1
+        return real_render(facts_package, mode=mode)
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _render)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert render_calls["n"] == 2  # Render nach Draft + Re-Render nach Revision
+    assert len(seen) == 2  # zwei Reviews (vor + nach Revision)
+    assert seen[0] == seen[1]  # beide pruefen den gerenderten (identischen) Text
+    assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+def test_dry_run_skips_final_render_hook(monkeypatch, tmp_path, portfolio, transactions):
+    """Dry-Run: render_final_briefing wird NICHT aufgerufen — der Platzhalter
+    _dry_run_placeholder bleibt der unveraenderte Dry-Run-Pfad (Teil 2)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    render_calls = {"n": 0}
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(final_briefing, "render_final_briefing", lambda facts_package, mode="monday": (render_calls.__setitem__("n", render_calls["n"] + 1), "GERENDERT")[1])
+
+    rc = run_briefing.run("monday", dry_run=True)
+
+    assert rc == 0
+    assert render_calls["n"] == 0  # kein Render im Dry-Run
+    assert sent == []  # kein Telegram
+    archived = [p.name for p in tmp_path.iterdir()]
+    assert archived and all(name.endswith("-monday-dryrun.md") for name in archived)
+    content = (tmp_path / archived[0]).read_text(encoding="utf-8")
+    assert "Dry-Run — kein LLM-Call" in content  # Platzhalter-Inhalt unveraendert
+    assert "GERENDERT" not in content
+
+
+def test_final_render_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Render-Fehler im produktiven Pfad -> fail-closed: Alert, kein Versand,
+    keine Vault-Datei, staged wird verworfen."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+
+    def _broken_render(facts_package, mode="monday"):
+        raise RuntimeError("Renderer-Bug")
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _broken_render)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "final render failed" in sent[0][0]
+    assert "Renderer-Bug" in sent[0][0]
 
 
 def test_dry_run_writes_suffix_file_without_llm(monkeypatch, tmp_path, portfolio, transactions):
@@ -304,6 +439,148 @@ def _sequential_review(*responses):
     return _review
 
 
+# --- GLM-Review-Kontrakt: deterministische Sektionen --------------------------
+# Die finalen Sektionen werden von Python deterministisch gerendert
+# (final_briefing.py); GLM darf dort keine eigenen Status-, Zahlen-,
+# Kategorien-, Transaktions- oder Strategieänderungen behaupten. Liefert
+# das Review-JSON trotzdem klar halluzinierte Findings, filtert der
+# Orchestrator genau diese — echte Findings bleiben fail-closed.
+
+# Die drei bekannten halluzinierten Findings des echten Laufs 2026-08-19:
+# Datenqualität, fehlende Ampelkategorien, Transaktions-/Strategieänderungen.
+HALLUCINATED_FINDINGS = [
+    {
+        "severity": "major",
+        "issue": "Datenqualität: Status stimmt nicht mit dem Faktenpaket überein",
+        "evidence": "Draft: 'Datenqualität: ok.' — Faktenpaket: data_quality issues vorhanden",
+        "correction": "Datenqualität aus dem Faktenpaket übernehmen",
+    },
+    {
+        "severity": "major",
+        "issue": "Strategie-Abgleich: fehlende Ampelkategorie",
+        "evidence": "Strategie-Abgleich enthält nur 6 Kategorien statt der 7 verbindlichen",
+        "correction": "Alle 7 Ampelkategorien ergänzen",
+    },
+    {
+        "severity": "major",
+        "issue": "Transaktionszahlen widersprechen dem Faktenpaket",
+        "evidence": "Draft nennt '3 neu, 2 entfernt', Faktenpaket added_count/removed_count 0",
+        "correction": "Transaktionszahlen 1:1 aus dem Faktenpaket übernehmen",
+    },
+]
+HALLUCINATED_REVIEW = {"findings": HALLUCINATED_FINDINGS, "overall_verdict": "block"}
+
+# Echte (nicht-deterministische) Review-Findings: bleiben fail-closed blockierend.
+REAL_REVIEW_FINDINGS = [
+    {
+        "severity": "critical",
+        "issue": "Kaufanweisung außerhalb der Optionen-Sektion",
+        "evidence": "Draft enthält 'kaufen Sie Apple' außerhalb von ## Entscheidungsrelevante Punkte",
+        "correction": "Kaufanweisung entfernen",
+    },
+    {
+        "severity": "major",
+        "issue": "Kurzlage widerspricht der deterministischen Zusammenfassung",
+        "evidence": "Draft: 'Alle Grenzen eingehalten' — deterministic_summary: red_checks enthält drift",
+        "correction": "Kurzlage an red_checks anpassen",
+    },
+]
+
+
+def test_hallucinated_deterministic_review_does_not_block(monkeypatch, tmp_path, portfolio, transactions):
+    """Regression (echter Lauf 2026-08-19): ein Review mit den drei bekannten
+    halluzinierten Findings (Datenqualität, Ampelkategorien, Transaktionen/
+    Strategie) blockt den Gate NICHT mehr — die deterministisch gerenderten
+    Sektionen sind kein Review-Bereich für Faktenbehauptungen."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: HALLUCINATED_REVIEW)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert len(sent) == 1 and sent[0][1] == "monday"  # Briefing versendet, nur kein Alert
+    assert all(mode != "alert" for _, mode in sent)
+
+
+def test_real_review_finding_still_blocks(monkeypatch, tmp_path, portfolio, transactions):
+    """Fail-closed: echte nicht-deterministische Review-Findings (unerlaubte
+    Kaufanweisung, Kurzlage-Verstoß) bleiben trotz Filterung blockierend —
+    kein Umgehen des Gates durch den Kontrakt-Filter."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    review = {"findings": REAL_REVIEW_FINDINGS, "overall_verdict": "block"}
+    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "final_gate" in sent[0][0]
+
+
+def test_filter_removes_hallucinated_deterministic_findings():
+    """Unit: die drei bekannten halluzinierten Findings werden gefiltert."""
+    filtered = run_briefing._filter_review_findings(HALLUCINATED_REVIEW)
+    assert filtered["findings"] == []
+    # Alle Findings halluziniert -> overall_verdict hat keine Basis mehr: pass,
+    # damit ein reines Halluzinations-Review den Gate nicht blockiert.
+    assert filtered["overall_verdict"] == "pass"
+
+
+def test_filter_keeps_real_review_findings():
+    """Unit: echte Review-Findings bleiben erhalten (fail-closed), Verdict bleibt."""
+    review = {"findings": REAL_REVIEW_FINDINGS, "overall_verdict": "block"}
+    filtered = run_briefing._filter_review_findings(review)
+    assert filtered["findings"] == REAL_REVIEW_FINDINGS
+    assert filtered["overall_verdict"] == "block"
+
+
+def test_filter_mixed_keeps_remaining_findings_and_verdict():
+    """Unit: gemischtes Review — nur halluzinierte Findings fliegen raus,
+    echte bleiben, overall_verdict bleibt unangetastet (fail-closed)."""
+    review = {
+        "findings": [
+            HALLUCINATED_FINDINGS[0],
+            {
+                "severity": "major",
+                "issue": "Kurzlage verzerrt: rot statt gelb für Drift",
+                "evidence": "deterministic_summary: yellow_checks=[drift], Draft behauptet rot",
+                "correction": "Kurzlage an yellow_checks anpassen",
+            },
+        ],
+        "overall_verdict": "revise",
+    }
+    filtered = run_briefing._filter_review_findings(review)
+    assert len(filtered["findings"]) == 1
+    assert filtered["findings"][0]["issue"] == "Kurzlage verzerrt: rot statt gelb für Drift"
+    assert filtered["overall_verdict"] == "revise"  # Verdict bleibt: echte Findings übrig
+
+
+def test_filter_defensive_on_invalid_input():
+    """Unit: Nicht-Dict/fehlender findings-Key bleiben unverändert (defensiv)."""
+    assert run_briefing._filter_review_findings(None) is None
+    assert run_briefing._filter_review_findings("nope") == "nope"
+    review = {"overall_verdict": "pass"}
+    assert run_briefing._filter_review_findings(review) is review
+    review = {"findings": "kaputt", "overall_verdict": "pass"}
+    assert run_briefing._filter_review_findings(review) is review
+
+
+def test_filter_does_not_mutate_input():
+    """Unit: Filter erzeugt keine Mutation des Eingabe-Reviews."""
+    import copy
+
+    review = copy.deepcopy(HALLUCINATED_REVIEW)
+    run_briefing._filter_review_findings(review)
+    assert review == HALLUCINATED_REVIEW
+
+
 def test_pass_verdict_skips_revision(monkeypatch, tmp_path, portfolio, transactions):
     """overall_verdict=pass -> kein Revise-Aufruf, unveraendert zum final_gate, Versand."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
@@ -344,18 +621,43 @@ def test_revise_then_successful_revision_sends(monkeypatch, tmp_path, portfolio,
 
 
 def test_revise_second_verify_blocks(monkeypatch, tmp_path, portfolio, transactions):
-    """Revision -> erneuter verify_draft findet major-Finding -> fail-closed, kein Versand."""
+    """Revision -> erneuter verify_draft findet major-Finding im GERENDERTEN
+    Text -> fail-closed, kein Versand. Der Re-Render nach der Revision (Teil 2)
+    ist die Basis des zweiten verify-Laufs — ein Renderer-Output mit
+    unbekanntem Ticker blockt, nicht der rohe Revise-Output."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
     monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
     monkeypatch.setattr(llm_review, "review_draft", _sequential_review(REVISE_REVIEW, PASS_REVIEW))
-    bad_revision = VALID_DRAFT.replace("AAPL", "MSFT")  # MSFT nicht im Portfolio -> major
-    monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: bad_revision)
+    monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: VALID_DRAFT)
+
+    # Referenz auf den ungemockten Renderer vor dem Monkeypatch.
+    real_render = final_briefing.render_final_briefing
+    render_calls = {"n": 0}
+
+    def _flaky_render(facts_package, mode="monday"):
+        # Erster Render ok; der Re-Render nach der Revision liefert einen Text
+        # mit unbekanntem Ticker -> zweiter verify-Lauf findet major-Finding.
+        render_calls["n"] += 1
+        rendered = real_render(facts_package, mode=mode)
+        if render_calls["n"] > 1:
+            # Kurzer Output-Contract (Phase 5): keine '## Empfehlung'-Sektion
+            # mehr — den unbekannten Ticker ans Ende der Kurzlage (vor der
+            # naechsten Sektion) haengen, die verify gegen das Portfolio prueft.
+            return rendered.replace(
+                "## Datenqualität",
+                "MSFT (MSFT) im Fokus — Empfehlung: nicht bestimmbar.\n\n## Datenqualität",
+                1,
+            )
+        return rendered
+
+    monkeypatch.setattr(final_briefing, "render_final_briefing", _flaky_render)
 
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 1
+    assert render_calls["n"] == 2  # Render nach Draft + Re-Render nach Revision
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1 and sent[0][1] == "alert"
 

@@ -35,7 +35,9 @@ VALID_DRAFT = (
     "## Strategie-Abgleich\n"
     "—\n\n"
     "## Relevante News & Veränderungen\n"
-    "—"
+    "—\n\n"
+    "## Empfehlung\n"
+    "WATCH — kein Handlungsbedarf."
 )
 PASS_REVIEW = {"findings": [], "overall_verdict": "pass"}
 
@@ -77,6 +79,8 @@ def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions) -> dict:
     monkeypatch.setattr(snapshot, "discard_staged", _discard_staged)
     monkeypatch.setattr(sc_bridge, "refresh_from_sc", lambda: (portfolio, transactions))
     monkeypatch.setattr(sc_bridge, "load_mock", lambda: (portfolio, transactions))
+    monkeypatch.setattr(sc_bridge, "fetch_watchlist_from_sc", lambda: [])
+    monkeypatch.setattr(sc_bridge, "load_mock_watchlist", lambda: [])
     monkeypatch.setattr(analyze, "load_strategy", lambda: EMPTY_STRATEGY)
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: [])

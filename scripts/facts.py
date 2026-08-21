@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from scripts import analyze
+
 PIPELINE_VERSION = "2.0"
 
 # Reihenfolge der Checks mit Status-Feld, wie von analyze.analyze_portfolio erzeugt.
@@ -151,6 +153,68 @@ def _strategy_thresholds_pct(strategy: dict) -> dict:
     }
 
 
+# Maximale Anzahl gerenderter Signale je Sektion (Phase 5, kurzer Output).
+MAX_SATELLITE_SELL_SIGNALS = 3
+MAX_WATCHLIST_SIGNALS = 3
+
+
+def _signal_sort_key(signal: object, index: int) -> tuple:
+    """Deterministischer Sortierschluessel fuer Signal-Objekte.
+
+    Nicht-Signale (NO SIGNAL) ans Ende, dann absteigend nach Score,
+    dann stabil nach Listenindex (kein Vergleich nicht-vergleichbarer
+    Werte). Signal-Labels haben eine feste Rangfolge (SELL > REDUCE >
+    BUY > AVOID > WATCH > NO SIGNAL), damit die Auswahl nicht von der
+    Sortierung nicht-vergleichbarer Felder abhaengt.
+    """
+    _RANK = {"SELL": 6, "REDUCE": 5, "BUY": 4, "AVOID": 3, "WATCH": 2, "NO SIGNAL": 1}
+    if not isinstance(signal, dict):
+        return (0, 0.0, 0, index)
+    label = str(signal.get("signal", "NO SIGNAL"))
+    score = signal.get("score")
+    score = score if isinstance(score, (int, float)) and not isinstance(score, bool) else 0.0
+    # Negativer Rank: hoeherer Rang (SELL 6) sortiert zuerst (absteigend),
+    # danach Score absteigend — siehe Docstring-Rangfolge.
+    # Negativer Rank: hoeherer Rang (SELL 6) sortiert zuerst (absteigend),
+    # danach Score absteigend — siehe Docstring-Rangfolge.
+    return (-_RANK.get(label, 0), -float(score), 1 if signal.get("excluded") else 0, index)
+
+
+def _split_satellite_sell_signals(signals: list) -> list[dict]:
+    """Sell-/Reduce-Kandidaten aus den Signal-Objekten (bestehende Satellites).
+
+    Nur SELL/REDUCE-Signale fuer bestehende Satellite-Holdings; Core-ETFs
+    (excluded) und SUSE/Legacy (excluded) sind ausgeschlossen (Phase 5).
+    """
+    result: list[dict] = []
+    if not isinstance(signals, list):
+        return result
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        if signal.get("excluded"):
+            continue
+        if signal.get("signal") in ("SELL", "REDUCE"):
+            result.append(signal)
+    return result
+
+
+def _select_watchlist_signals(signals: list) -> list[dict]:
+    """Max. ``MAX_WATCHLIST_SIGNALS`` Watchlist-Signale (deterministisch).
+
+    Reine NO-SIGNAL-Eintraege (inkl. Core-ETF/Legacy-Ausschluss) werden
+    nicht in die Auswahl uebernommen — die Sektion zeigt sonst
+    "Keine Watchlist-Signale", was der Abschluss-Text abbildet.
+    """
+    if not isinstance(signals, list):
+        return []
+    ranked = sorted(
+        (s for s in signals if isinstance(s, dict) and s.get("signal") != "NO SIGNAL"),
+        key=lambda s: _signal_sort_key(s, 0),
+    )
+    return ranked[:MAX_WATCHLIST_SIGNALS]
+
+
 def _has_relevant_changes(changes: dict | None) -> bool:
     """Relevante Portfolio-Veränderungen: Positionen added/removed/changed oder
     Transaktionen added/removed. Reine Werte-Bewegungen unter den Diff-Schwellen
@@ -228,6 +292,9 @@ def build_facts_package(
     mode: str,
     changes: dict | None = None,
     data_quality: dict | None = None,
+    previous_snapshot: dict | None = None,
+    current_captured_at: str | None = None,
+    watchlist: list | None = None,
 ) -> dict:
     """Build the deterministic, JSON-serializable facts package.
 
@@ -246,13 +313,72 @@ def build_facts_package(
     berechnet, inkl. Vorgaenger-Snapshot); None bei fehlender Bewertung
     (Dry-Run/Erstlauf) -> keine Suppression roter Befunde.
 
+    ``previous_snapshot`` (optional): liefert die Kurs-/Wertdaten fuer die
+    6-Monats-Performance (``position_perf_6m``). Fehlen Daten oder liegt kein
+    Snapshot im 6-Monats-Fenster, bleibt die Performance fail-closed (kein
+    SELL aus der Performance-Regel). ``current_captured_at`` (optional) ist
+    der ISO-Zeitpunkt des aktuellen Stands fuer die Fensterpruefung.
+
     ``strategy_diff`` stammt aus ``changes["strategy"]`` (diff.diff_strategy)
     und enthaelt nur Feld-Pfade + Hashes — nie Strategiewerte. ``triggers``
     (compute_triggers) ist die deterministische Trigger-Basis fuer die
     Optionen-Generierung.
+
+    ``watchlist`` (optional, Phase 5): normalisierte Watchlist-Items
+    (sc_bridge.normalize_watchlist_items) bzw. leer, wenn keine Watchlist
+    vorhanden ist (legitimer Zustand -> leere Signal-Sektionen).
     """
     summary = _deterministic_summary(portfolio, analysis, data_quality)
     strategy_diff = changes.get("strategy") if isinstance(changes, dict) else None
+    # Briefing-Schnittstelle (Plan §6a): Ampel (7 Kategorien), Gesamt-Empfehlung
+    # und Top-3-Positionsvorschlaege — deterministisch aus analyze abgeleitet.
+    # Nur wenn die Analyse tatsaechlich Checks enthaelt (echte Daten); leere
+    # Analyse (Test-Mocks/Defensiv) erzeugt keine Briefing-Entscheidungen.
+    checks = analysis.get("checks") if isinstance(analysis, dict) else None
+    if isinstance(checks, dict) and checks:
+        # 6-Monats-Performance aus dem Vorgaenger-Snapshot (fail-closed bei
+        # fehlenden Daten: Positionen ohne Daten erzeugen keinen SELL).
+        position_perf = analyze.compute_position_perf_6m(
+            portfolio, previous_snapshot, current_captured_at
+        )
+        decisions = analyze.build_briefing_decisions(
+            analysis, strategy, transactions, data_quality, position_perf=position_perf
+        )
+        summary["traffic_lights"] = decisions["traffic_lights"]
+        summary["recommendation"] = decisions["recommendation"]
+        summary["position_actions"] = decisions["position_actions"]
+        summary["position_perf_6m"] = position_perf
+    else:
+        summary["traffic_lights"] = {}
+        summary["recommendation"] = {}
+        summary["position_actions"] = []
+        summary["position_perf_6m"] = {}
+
+    # Watchlist-/Satellite-Signale (Plan Phase 5): deterministisch aus
+    # analyze.compute_watchlist_signals. Signale nutzen NIE Fundamentaldaten
+    # (KGV/Gewinn/Umsatz/Cashflow/Verschuldung/Bewertung) — das Signal-Objekt
+    # traegt ``fundamentals_used: false``, damit der Renderer den Disclaimer
+    # in jeder Signal-Sektion verankern kann. Ohne Watchlist-Daten
+    # (None/fehlend) -> leere Listen (kein Crash, aber transparent "keine
+    # Watchlist-Positionen"). Core-ETF-Sparplaene sind Strategie-Setup und
+    # erscheinen nie als Satellite-Trade; ETFs sind keine Einzelpositionen
+    # (compute_watchlist_signals wendet die Ausschlussregeln an).
+    watchlist_items = watchlist if isinstance(watchlist, list) else []
+    if watchlist_items:
+        signal_items = analyze.compute_watchlist_signals(
+            watchlist_items,
+            portfolio,
+            analysis if isinstance(analysis, dict) else {},
+            news,
+            strategy,
+            previous_snapshot=previous_snapshot,
+            current_captured_at=current_captured_at,
+        )
+        summary["watchlist_signals"] = _select_watchlist_signals(signal_items)
+        summary["satellite_sell_signals"] = _split_satellite_sell_signals(signal_items)
+    else:
+        summary["watchlist_signals"] = []
+        summary["satellite_sell_signals"] = []
     package = {
         "meta": {
             "mode": mode,
@@ -264,6 +390,7 @@ def build_facts_package(
         "news": news,
         "strategy": strategy,
         "transactions": transactions,
+        "watchlist": watchlist_items,
         "changes": changes,
         "data_quality": data_quality,
         "strategy_diff": strategy_diff,

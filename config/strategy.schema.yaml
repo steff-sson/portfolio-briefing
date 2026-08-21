@@ -1,0 +1,261 @@
+# config/strategy.schema.yaml — kanonisches Strategie-Schema (Single Source of Truth)
+#
+# Einziges autoritatives Schema fuer Setup, Validierung, Analyse und Doku der
+# Anlagestrategie. Eingecheckt (NICHT gitignored). Unbekannte Felder schlagen
+# ueberall fehl (fail-closed) — es gibt kein stilles Ignorieren mehr.
+#
+# Struktur:
+#   sections: <name> -> {fields: {<feld>: <feldspez>}, required: bool}
+#   Feldspez (fuer Felder ohne eigenen "fields"-Block):
+#     type: str|int|float|bool|enum|list|dict
+#     required: bool          (analyserelevant -> muss vollstaendig beantwortet sein)
+#     mapping: analyserelevant|dokumentationsrelevant|bewusst_informativ
+#     enum: [...]             (nur bei type: enum)
+#     items: str|...          (nur bei type: list)
+#     fields: {...}           (nur bei type: dict — verschachtelte Feldspez)
+#     comment: str            (Frage/Kontext, dokumentierend)
+#
+# Validierungsregeln (fachlich, gelten fuer die Wurzel-Strategie):
+#   - portfolio.core_pct + portfolio.satellite_pct == 100 (Toleranz 0.01)
+#   - satellite_limits.max_position_pct <= max_sector_pct
+#   - satellite_limits.max_positions >= 1
+#   - satellite_limits.max_trades_per_quarter >= 1 (geklaerter Wert: 5)
+#   - Datumsfelder: YYYY-MM-DD
+#
+# Default-verbot: keine fachlichen Default-Werte in den Feldern — die Werte
+# kommen ausschliesslich aus den bestaetigten Setup-Antworten (answers.reviewed.yaml).
+
+sections:
+  meta:
+    required: false
+    fields:
+      version:
+        type: int
+        required: true
+        mapping: dokumentationsrelevant
+        comment: Versionsnummer der Strategie (wird bei jeder Emission hochgezaehlt)
+      created:
+        type: date
+        required: true
+        mapping: dokumentationsrelevant
+        comment: Erstellungsdatum (YYYY-MM-DD)
+      last_reviewed:
+        type: date
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Datum des letzten Reviews (YYYY-MM-DD)
+      next_review:
+        type: date
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Datum des naechsten Reviews (YYYY-MM-DD)
+      cooling_off_days:
+        type: int
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 13 — Cooling-Off-Tage vor Strategieaenderung (kein automatischer Check)
+
+  investor:
+    required: false
+    fields:
+      horizon:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 1 — Anlagehorizont
+      purpose:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 1 — Anlagezweck
+      income_source:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 2 — Einkommensquelle
+      monthly_savings_eur:
+        type: int
+        required: false
+        mapping: analyserelevant
+        comment: Frage 2 — Sparrate in EUR/Monat; analyserelevant fuer die BUY-Empfehlung (§6a); fehlt der Wert, entfaellt die BUY-Option
+      experience_years:
+        type: int
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 3 — Erfahrung mit Einzelaktien in Jahren (kein automatischer Grenzwert)
+      check_frequency:
+        type: enum
+        required: false
+        mapping: bewusst_informativ
+        enum: [daily, weekly, monthly, quarterly]
+        comment: Frage 4 — Check-Frequenz (bewusst informativ, keine Ableitung)
+      leverage:
+        type: enum
+        required: false
+        mapping: dokumentationsrelevant
+        enum: [none, broker, margin]
+        comment: Hebel-Nutzung (kein Hebel = none)
+      external_provision:
+        type: list
+        required: false
+        mapping: bewusst_informativ
+        items: dict
+        comment: Externe Vorsorgebausteine ausserhalb des Depots (z.B. private Rentenversicherung) — bewusst informativ, nie analyserelevant
+      personal_context:
+        type: str
+        required: false
+        mapping: bewusst_informativ
+        comment: Frage 15 — Persoenliche Faktoren (Freitext, nur Dokumentation)
+
+  portfolio:
+    required: true
+    fields:
+      core_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 5 — Core-Zielquote in Prozent (gelesen von calculate_core_satellite, calculate_drift)
+      satellite_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 5 — Satellite-Zielquote in Prozent (muss mit core_pct zusammen 100 ergeben)
+      core_description:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Beschreibung des Cores
+      rebalancing:
+        type: dict
+        required: false
+        mapping: analyserelevant
+        fields:
+          method:
+            type: str
+            required: false
+            mapping: dokumentationsrelevant
+          threshold_pct:
+            type: float
+            required: false
+            mapping: analyserelevant
+            comment: Rebalancing-Toleranzband in Prozentpunkten (gelesen von calculate_core_satellite, calculate_drift)
+
+  satellite_limits:
+    required: true
+    fields:
+      target_position_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 6 — Ziel-Positionsgroesse in Prozent (gelbe Stufe Einzelposition)
+      warn_position_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 6 — Warn-Positionsgroesse in Prozent (gelbe Stufe Einzelposition)
+      max_position_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 6 — Max. Positionsgroesse in Prozent (rote Stufe Einzelposition)
+      max_sector_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 7 — Max. Sektor-Konzentration in Prozent
+      max_positions:
+        type: int
+        required: true
+        mapping: analyserelevant
+        comment: Frage 8 — Max. Anzahl Positionen
+      max_turnover_annual_pct:
+        type: float
+        required: true
+        mapping: analyserelevant
+        comment: Frage 9 — Max. Jahresumschlag in Prozent
+      max_trades_per_quarter:
+        type: int
+        required: true
+        mapping: analyserelevant
+        comment: "Frage 10 — Max. Trades pro Quartal (geklaerter Wert: 5)"
+
+  sectors:
+    required: false
+    fields:
+      preferred:
+        type: list
+        required: false
+        mapping: analyserelevant
+        items: str
+        comment: Frage 11 — Bevorzugte Sektoren
+      excluded:
+        type: list
+        required: false
+        mapping: analyserelevant
+        items: str
+        comment: Frage 11 — Ausgeschlossene Sektoren
+      notes:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Freie Notizen
+
+  regions:
+    required: false
+    fields:
+      core:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Core-Region
+      satellite_restriction:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Satellite-Einschraenkung
+
+  thesis:
+    required: false
+    fields:
+      required:
+        type: bool
+        required: false
+        mapping: analyserelevant
+        comment: Frage 12 — Thesis-Pflicht vor Satellite-Kauf
+      template:
+        type: str
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Vorlage-Dateiname
+
+  alerts:
+    required: false
+    fields:
+      on_thesis_expiring_soon_days:
+        type: int
+        required: false
+        mapping: analyserelevant
+        comment: Ablauffrist fuer Thesen in Tagen (gelesen von check_thesis_deadlines)
+
+  review_schedule:
+    required: false
+    fields:
+      quarterly_strategy_review:
+        type: bool
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 14 — Quartalsweises Strategie-Review
+      annual_full_review:
+        type: bool
+        required: false
+        mapping: dokumentationsrelevant
+        comment: Frage 14 — Jaehrliches Voll-Review
+      triggers:
+        type: list
+        required: false
+        mapping: dokumentationsrelevant
+        items: str
+        comment: Frage 14 — Review-Trigger
+
+  # Bewusst informative / nicht-emittierte Felder (nur answers.reviewed.yaml + Doku):
+  #   investor.external_provision, investor.personal_context, investor.check_frequency

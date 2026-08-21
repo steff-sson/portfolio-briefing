@@ -12,8 +12,8 @@ deterministic first → DeepSeek Draft → Python verify → GLM Review → (opt
 
 - **Deterministic first:** `sc_bridge` → `analyze` → `filter_news` → `facts.build_facts_package` (inkl. `deterministic_summary`, der einzigen erlaubten Zahlenquelle).
 - **Live-First-Daten:** produktiver Lauf via `snapshot.load_previous()` → `sc_bridge.refresh_from_sc()` (fail-closed, kein Mock) → `snapshot.capture()` → `diff.diff_snapshots()`; Persistenz nur über das Snapshot-Modul (`config/snapshot.current.json` + `config/snapshots/archive/`), kein `update_config`. Mock (`load_mock()`) nur im Dry-Run.
-- **DeepSeek Draft:** `llm_briefing.generate_draft` (`deepseek-v4-flash`), feste Sektionen (Kurzlage, Datenqualität, Entscheidungsrelevante Punkte, Strategie-Abgleich, Relevante News & Veränderungen).
-- **Python verify:** `verify.verify_draft` — alle 5 Sektionen, Zahlen (vs. deterministic_summary, ±0.5pp), Ticker/ISIN (vs. Portfolio), News-Referenz; erkennt LLM-Fehlerstrings.
+- **DeepSeek Draft:** `llm_briefing.generate_draft` (`deepseek-v4-flash`), feste Sektionen (Kurzlage, Datenqualität, Entscheidungsrelevante Punkte, Strategie-Abgleich, Relevante News & Veränderungen) + abschließende `## Empfehlung` (BUY/SELL/WATCH, Label 1:1 aus `deterministic_summary.recommendation`).
+- **Python verify:** `verify.verify_draft` — alle Sektionen, Zahlen (vs. deterministic_summary, 1:1), Ticker/ISIN (vs. Portfolio), News-Referenz, Ampeln (7 Kategorien) + Empfehlungs-Label + Positionsvorschläge (max. 3) + Neukaufideen (max. 2, ≥2 unabhängige Quellen) 1:1; erkennt LLM-Fehlerstrings.
 - **GLM Review:** `llm_review.review_draft` (`glm-5.2`), striktes JSON (findings + overall_verdict pass|revise|block).
 - **Optionale 1× DeepSeek-Revision:** `llm_revise.revise_draft` nur bei `revise` und ausschließlich nicht-kritischen Findings; max 1 Revision (`MAX_REVISIONS`), danach erneutes verify + Review.
 - **Final gate:** `verify.final_gate` — blockt bei critical/major (verify ODER review), `block`, `revise` nach max Revision, fehlendem/ungültigem Verdict. minor/info blocken nie.
@@ -43,14 +43,16 @@ Session-Lifecycle des scalable.capital-CLI — offiziell bestätigt durch den Ma
 - **Fehlerklassen:** `no_session` / `REFRESH_RELOGIN_REQUIRED` → `sc login` erforderlich; `secret_storage_unavailable` → System-/Keyring-Prüfung. `healthcheck.py` differenziert die Status; `sc_bridge.refresh_from_sc` wirft dafür spezifische Exceptions (handlungsorientierte Alerts).
 - **`session_backend=file`:** wird von diesem Projekt nur dokumentierend geprüft, **niemals automatisch überschrieben** (keine Änderung der sc-Konfiguration).
 
-## Cron-Setup (offener Schritt — noch nicht aktiviert)
+## Cron-Setup (Healthcheck aktiv, Briefings offen)
+
+Der Healthcheck ist über die zentrale Crontab (`~/github/automation-core/crontab.txt`, Source of Truth, installiert als User-Crontab) täglich 06:00 aktiv. Die Briefing-Läufe sind noch nicht aktiviert:
 
 ```bash
 0 8 * * 1 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monday
 0 18 * * 5 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py friday
 30 8 1 * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monthly
 # Healthcheck 1× täglich 06:00 — hält sc-Session aktiv (sc whoami --json), vor Montag-Lauf 08:00
-0 6 * * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/healthcheck.py
+# Aktiv via automation-core/crontab.txt: cd /home/stef/github/portfolio-briefing && .venv/bin/python scripts/healthcheck.py
 ```
 
 ## Testlauf (Mock-only, ohne API-Calls)

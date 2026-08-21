@@ -39,7 +39,7 @@ def test_build_snapshot_schema(portfolio, transactions):
     snap = snapshot.build_snapshot(
         portfolio, transactions, mode="monday", sc_meta={"source": "sc"}, captured_at=T1
     )
-    assert snap["schema_version"] == 1
+    assert snap["schema_version"] == 2  # Plan §9: SCHEMA_VERSION=2
     assert snap["captured_at"] == T1
     assert snap["mode"] == "monday"
     assert snap["portfolio"] == portfolio
@@ -145,6 +145,16 @@ def test_read_snapshot_wrong_schema_version_returns_none(paths):
     current, _ = paths
     current.write_text(json.dumps({"schema_version": 999, "portfolio": {}}), encoding="utf-8")
     assert snapshot.read_snapshot(current) is None
+
+
+def test_read_snapshot_legacy_schema_version_1_still_readable(paths):
+    """Plan §9: alte Snapshots (Schema-Version 1) bleiben lesbar, werden aber
+    als alt markiert — neue Snapshots schreiben Version 2."""
+    current, _ = paths
+    current.write_text(json.dumps({"schema_version": 1, "portfolio": {}, "captured_at": "2026-08-13T10:00:00+00:00"}), encoding="utf-8")
+    assert snapshot.read_snapshot(current) is not None  # alt lesbar
+    snap = snapshot.build_snapshot({"holdings": []}, [], captured_at=T1)
+    assert snap["schema_version"] == 2  # neu schreibt 2
 
 
 def test_capture_with_corrupt_predecessor_keeps_working(paths, portfolio, transactions):

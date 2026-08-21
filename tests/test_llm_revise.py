@@ -74,11 +74,10 @@ def test_uses_deepseek_v4_flash_and_injects_findings():
 
 
 def test_revise_prompt_uses_five_section_contract():
-    """revise.txt folgt dem 5-Sektionen-Output-Contract. Die fruehere
-    Ausbaustufen-Grenze (Verhaltens-Spiegel zu Trades, keine zeitliche
-    Transaktionsinterpretation) ist in der aktuellen Ausbaustufe bewusst
-    entfernt — der Revisor muss den Entwurf ohne diese Regel umbauen
-    (zeitliche Interpretation ist kein Regelungsgegenstand mehr)."""
+    """revise.txt folgt dem Output-Contract (5 Kernsektionen + abschliessende
+    ## Empfehlung, Plan §6a). Die fruehere Ausbaustufen-Grenze (Verhaltens-
+    Spiegel zu Trades, keine zeitliche Transaktionsinterpretation) ist in der
+    aktuellen Ausbaustufe bewusst entfernt."""
     content = llm_revise.REVISE_PROMPT_PATH.read_text(encoding="utf-8")
     for section in (
         "## Kurzlage",
@@ -86,9 +85,10 @@ def test_revise_prompt_uses_five_section_contract():
         "## Entscheidungsrelevante Punkte",
         "## Strategie-Abgleich",
         "## Relevante News & Veränderungen",
+        "## Empfehlung",
     ):
         assert section in content
-    assert "nur die 5 Sektionen" in content
+    assert "nur die 6 Sektionen" in content
     # Bewusst entfernte Verhaltens-Spiegel-Regel: nicht wieder einfuehren
     assert "Verhaltens-Spiegel" not in content
     assert "Ausbaustufen-Grenze" not in content

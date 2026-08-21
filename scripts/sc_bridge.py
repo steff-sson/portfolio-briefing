@@ -8,6 +8,14 @@ Bei fehlendem sc, non-zero Exit, ungueltigem JSON, ok=false, fehlender Struktur,
 ungueltigen items oder leerer Holdings-Liste wird eine definierte
 ScBridgeError-Subklasse geworfen — niemals Mock-Fallback.
 
+Watchlist (Plan Phase 2): separater Live-Abruf ueber fetch_watchlist_from_sc()
+(`sc broker watchlist --json`), gleiche Wrapper-/Legacy-Toleranz wie Holdings.
+Leere Watchlist ist ein legitimer Zustand -> [] ohne Exception (kein
+ScEmptyDataError). Items werden zentral normalisiert (normalize_watchlist_items):
+value_eur aus vorhandenem value_eur-Feld oder aus valuation mit
+valuation_currency EUR; category aus vorhandenem category-Feld oder aus
+config/etf_lookup.json (ISIN), sonst explizit "unknown".
+
 Holdings werden zentral normalisiert (normalize_holdings): value_eur kommt aus
 dem vorhandenen value_eur-Feld oder aus valuation mit valuation_currency EUR
 (nicht aus Nicht-EUR-Werten); die Core/Satellite-Kategorie kommt aus dem
@@ -17,9 +25,9 @@ Summenfelder (total_value_eur, cash_eur) werden aus dem Payload uebernommen
 oder — nur wenn fachlich eindeutig, d.h. jede Holding hat einen EUR-Wert —
 aus den Holdings aggregiert. Es werden keine Rohdaten geloggt.
 
-Mock-Daten gibt es nur ueber load_mock() und nur fuer Dry-Run
-(tests/mock_data/). get_portfolio()/get_transactions() sind read-only-Leser
-der config/-Dateien und erzeugen nichts automatisch.
+Mock-Daten gibt es nur ueber load_mock()/load_mock_watchlist() und nur fuer
+Dry-Run (tests/mock_data/). get_portfolio()/get_transactions() sind
+read-only-Leser der config/-Dateien und erzeugen nichts automatisch.
 """
 from __future__ import annotations
 
@@ -33,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 MOCK_PORTFOLIO = ROOT / "tests" / "mock_data" / "portfolio.json"
 MOCK_TRANSACTIONS = ROOT / "tests" / "mock_data" / "transactions.json"
+MOCK_WATCHLIST = ROOT / "tests" / "mock_data" / "watchlist.json"
 
 
 class ScBridgeError(Exception):
@@ -200,6 +209,43 @@ def normalize_holdings(holdings: list) -> list:
     return [_normalize_holding(h, lookup) for h in holdings]
 
 
+def _normalize_watchlist_item(item: dict, lookup: dict) -> dict:
+    """Normalisiert ein Watchlist-Item auf ein einheitliches Signal-Schema.
+
+    Ergaenzt value_eur (vorhandenes Feld oder EUR-valuation), category
+    (vorhandenes Feld oder Lookup per ISIN, sonst "unknown") und ticker
+    (vorhandenes Feld, sonst leer). quantity/valuation bleiben als Rohdaten
+    erhalten (meist 0/None bei Watchlist-Positionen). Rest bleibt erhalten.
+    """
+    normalized = dict(item)
+    existing = _as_float(normalized.get("value_eur"))
+    if existing is not None:
+        normalized["value_eur"] = existing
+    else:
+        valuation = _as_float(normalized.get("valuation"))
+        if valuation is not None and normalized.get("valuation_currency") == "EUR":
+            normalized["value_eur"] = valuation
+    category = normalized.get("category")
+    if not category:
+        entry = lookup.get(normalized.get("isin")) if isinstance(lookup, dict) else None
+        if isinstance(entry, dict):
+            category = entry.get("category")
+    normalized["category"] = category or "unknown"
+    if "ticker" not in normalized or not normalized.get("ticker"):
+        normalized["ticker"] = ""
+    return normalized
+
+
+def normalize_watchlist_items(items: list) -> list:
+    """Zentrale Watchlist-Normalisierung (Wrapper- und Legacy-Format).
+
+    Idempotent: vorhandene value_eur/category/ticker-Felder (z.B. Mock-Daten)
+    bleiben unveraendert. Erzeugt keine Rohdaten-Logs.
+    """
+    lookup = load_etf_lookup()
+    return [_normalize_watchlist_item(i, lookup) for i in items]
+
+
 def _aggregate_total_value_eur(holdings: list) -> float | None:
     """Summe aus Holdings, nur wenn fachlich eindeutig (jede Holding hat EUR-Wert).
 
@@ -253,6 +299,142 @@ def _extract_items(payload: dict | list, source: str, allow_list: bool = True) -
     return items
 
 
+# --- Transaktions-Normalisierung (Plan §9) -----------------------------------
+#
+# Das rohe sc-Transaktionsschema ist unnormalisiert: SECURITY_TRANSACTION /
+# CASH_TRANSACTION gemischt, side/type/security_transaction_type mehrdeutig,
+# amount-Vorzeichen unterschiedlich interpretiert, is_cancellation getrennt.
+# normalize_transactions erzeugt daraus ein einheitliches, periodisiertes
+# Schema pro Ereignis (Basis fuer Wochenvergleich + Turnover).
+
+_TRANSACTION_TYPE_BUY = "kauf"
+_TRANSACTION_TYPE_SELL = "verkauf"
+_TRANSACTION_TYPE_SAVINGS_PLAN = "sparplan"
+_TRANSACTION_TYPE_DEPOSIT = "einzahlung"
+_TRANSACTION_TYPE_DISTRIBUTION = "ausschuettung"
+_TRANSACTION_TYPE_OTHER = "sonstiges"
+
+
+def _txn_executed_at(txn: dict) -> str:
+    """ISO-Zeitpunkt (last_event_datetime), Fallback auf leeren String."""
+    value = txn.get("last_event_datetime")
+    return str(value) if value else ""
+
+
+def _txn_side(txn: dict) -> str:
+    """Seite (BUY/SELL/other) aus side; bei CASH-Typen 'other'."""
+    side = txn.get("side")
+    if side in ("BUY", "SELL"):
+        return side
+    return "other"
+
+
+def _txn_transaction_type(txn: dict) -> str:
+    """Normalisierter Transaktionstyp (kauf/verkauf/sparplan/einzahlung/...)."""
+    txn_type = txn.get("type")
+    if txn_type == "CASH_TRANSACTION":
+        cash_type = txn.get("cash_transaction_type")
+        if cash_type == "DEPOSIT":
+            return _TRANSACTION_TYPE_DEPOSIT
+        if cash_type == "DISTRIBUTION":
+            return _TRANSACTION_TYPE_DISTRIBUTION
+        return _TRANSACTION_TYPE_OTHER
+    side = _txn_side(txn)
+    sec_type = txn.get("security_transaction_type")
+    if sec_type == "SAVINGS_PLAN":
+        return _TRANSACTION_TYPE_SAVINGS_PLAN
+    if side == "BUY":
+        return _TRANSACTION_TYPE_BUY
+    if side == "SELL":
+        return _TRANSACTION_TYPE_SELL
+    return _TRANSACTION_TYPE_OTHER
+
+
+def _txn_isin(txn: dict) -> str:
+    """ISIN: direktes Feld oder related_isin bei Cash-Transaktionen."""
+    isin = txn.get("isin") or txn.get("related_isin")
+    return str(isin) if isin else ""
+
+
+def _txn_quantity(txn: dict) -> float:
+    value = _as_float(txn.get("quantity"))
+    return value if value is not None else 0.0
+
+
+def _txn_price_eur(txn: dict) -> float | None:
+    """Preis je Einheit (EUR): limit_price > quote_mid_price > abgeleitet.
+
+    Bei SECURITY_TRANSACTION ist limit_price der Ausfuehrungspreis, sonst
+    fallback auf quote_mid_price. Fehlt beides, wird der Preis aus
+    amount/quantity abgeleitet (nur wenn quantity > 0).
+    """
+    for key in ("limit_price", "quote_mid_price", "price_eur", "price"):
+        value = _as_float(txn.get(key))
+        if value is not None and value > 0:
+            return value
+    quantity = _txn_quantity(txn)
+    amount = _as_float(txn.get("amount"))
+    if quantity > 0 and amount is not None and abs(amount) > 0:
+        return round(abs(amount) / quantity, 6)
+    return None
+
+
+def _txn_amount_eur(txn: dict) -> float:
+    """Transaktionsvolumen (EUR): amount oder quantity * price (absolut)."""
+    amount = _as_float(txn.get("amount"))
+    if amount is not None:
+        return abs(amount)
+    price = _txn_price_eur(txn)
+    if price is not None:
+        return round(price * _txn_quantity(txn), 2)
+    return 0.0
+
+
+def _txn_currency(txn: dict) -> str:
+    value = txn.get("currency")
+    return str(value) if value else "EUR"
+
+
+def normalize_transactions(transactions: list) -> list:
+    """Normalisiert Roh-Transaktionen auf ein einheitliches Schema (Plan §9).
+
+    Pro Ereignis ein Eintrag mit einheitlichen Feldern:
+      isin, side (BUY/SELL/other), quantity, price_eur, amount_eur, currency,
+      executed_at (ISO), transaction_type (kauf/verkauf/sparplan/einzahlung/
+      ausschuettung/sonstiges), cancelled (bool), source_id (Original-ID).
+
+    Idempotent: bereits normalisierte Eintraege (mit "transaction_type" und
+    "executed_at") bleiben unveraendert (z.B. Mock-Daten im Legacy-Format
+    mit "date"/"type": "buy" bleiben fuer den Turnover lesbar).
+    """
+    normalized: list[dict] = []
+    for txn in transactions:
+        if not isinstance(txn, dict):
+            continue
+        # Bereits normalisiert: echtes neues Schema (transaction_type + executed_at)
+        # ODER Legacy-Mock-Format (date + type buy/sell) — beides bleibt unveraendert.
+        if txn.get("transaction_type") and txn.get("executed_at"):
+            normalized.append(txn)
+            continue
+        if txn.get("date") and txn.get("type") in ("buy", "sell"):
+            normalized.append(txn)
+            continue
+        entry = {
+            "isin": _txn_isin(txn),
+            "side": _txn_side(txn),
+            "quantity": _txn_quantity(txn),
+            "price_eur": _txn_price_eur(txn),
+            "amount_eur": _txn_amount_eur(txn),
+            "currency": _txn_currency(txn),
+            "executed_at": _txn_executed_at(txn),
+            "transaction_type": _txn_transaction_type(txn),
+            "cancelled": bool(txn.get("is_cancellation", False)),
+            "source_id": str(txn.get("id", "")),
+        }
+        normalized.append(entry)
+    return normalized
+
+
 def _portfolio_from_payload(payload: dict | list, holdings: list) -> dict:
     """Normalisiert den Holdings-Payload auf das Portfolio-Legacy-Format.
 
@@ -302,7 +484,29 @@ def refresh_from_sc() -> tuple[dict, list]:
     holdings = normalize_holdings(holdings)
     transactions_payload = _parse_json(_run_sc(["broker", "transactions", "--json"]), "sc broker transactions --json")
     transactions = _extract_items(transactions_payload, "sc broker transactions --json")
+    transactions = normalize_transactions(transactions)
     return _portfolio_from_payload(holdings_payload, holdings), transactions
+
+
+def fetch_watchlist_from_sc() -> list:
+    """Frischer Live-Abruf von `sc broker watchlist --json` (Plan Phase 2).
+
+    Akzeptiert das Legacy-Format (direkte Liste) sowie das CLI-Wrapper-Format
+    {ok, command, data: {..., result: {count, items}}}. Items werden zentral
+    normalisiert (normalize_watchlist_items: value_eur aus EUR-valuation,
+    category aus Lookup/unknown — siehe Modul-Docstring).
+
+    Fail-closed: fehlendes sc, non-zero Exit, ungueltiges JSON, ok=false,
+    fehlende Struktur oder ungueltige items -> definierte ScBridgeError-
+    Subklasse. Eine LEERE Watchlist ist ein legitimer Zustand (keine
+    Watchlist-Positionen) und liefert [] ohne Exception. Es gibt KEINEN
+    Mock-Fallback — Mock-Daten nur ueber load_mock_watchlist() (Dry-Run).
+    """
+    if not _sc_available():
+        raise ScNotAvailableError("sc CLI not found in PATH")
+    payload = _parse_json(_run_sc(["broker", "watchlist", "--json"]), "sc broker watchlist --json")
+    items = _extract_items(payload, "sc broker watchlist --json", allow_list=True)
+    return normalize_watchlist_items(items)
 
 
 def load_mock() -> tuple[dict, list]:
@@ -315,6 +519,23 @@ def load_mock() -> tuple[dict, list]:
     with open(MOCK_TRANSACTIONS, encoding="utf-8") as f:
         transactions = json.load(f)
     return portfolio, transactions
+
+
+def load_mock_watchlist() -> list:
+    """Mock-Watchlist ausschliesslich fuer Dry-Run (Plan Phase 2).
+
+    Liest tests/mock_data/watchlist.json; fehlende/korrupte Datei -> [] ohne
+    Exception (leere Watchlist ist ein legitimer Zustand). Niemals im
+    produktiven Pfad verwenden — produktiver Abruf ist fetch_watchlist_from_sc().
+    """
+    try:
+        with open(MOCK_WATCHLIST, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return normalize_watchlist_items(data)
 
 
 def update_config() -> tuple[dict, list]:

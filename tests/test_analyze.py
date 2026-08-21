@@ -26,10 +26,13 @@ REAL_STRATEGY = {
         "rebalancing": {"method": "threshold", "threshold_pct": 5.0},
     },
     "satellite_limits": {
+        "target_position_pct": 5.0,
+        "warn_position_pct": 7.5,
         "max_position_pct": 5.0,
         "max_sector_pct": 15.0,
         "max_positions": 10,
         "max_turnover_annual_pct": 30.0,
+        "max_trades_per_quarter": 5,
     },
     "alerts": {"on_thesis_expiring_soon_days": 30},
 }
@@ -356,7 +359,8 @@ def test_data_quality_incomplete_missing_value():
     portfolio = {"total_value_eur": 1000.0, "holdings": [{"isin": "X", "name": "X", "category": "core"}]}
     result = analyze.assess_data_quality(portfolio)
     assert result["status"] == "incomplete"
-    assert "Holding[0].value_eur/value fehlt" in result["issues"]
+    assert "kein Bewertungswert (valuation null)" in result["issues"][0]
+    assert "X" in result["issues"][0]
 
 
 def test_data_quality_implausible_negative_holding_value():
@@ -434,7 +438,18 @@ def test_validate_strategy_valid():
 def test_validate_strategy_minimal_valid():
     """Pflicht-Sektionen vorhanden, Werte optional -> gueltig."""
     result = analyze.validate_strategy(
-        {"portfolio": {"core_pct": 75.0, "satellite_pct": 25.0}, "satellite_limits": {}}
+        {
+            "portfolio": {"core_pct": 75.0, "satellite_pct": 25.0},
+            "satellite_limits": {
+                "target_position_pct": 5.0,
+                "warn_position_pct": 7.5,
+                "max_position_pct": 5.0,
+                "max_sector_pct": 15.0,
+                "max_positions": 10,
+                "max_turnover_annual_pct": 30.0,
+                "max_trades_per_quarter": 5,
+            },
+        }
     )
     assert result["valid"] is True
 
@@ -522,13 +537,536 @@ def test_validate_strategy_list_fields_must_be_lists():
     assert "sectors.preferred muss eine Liste sein" in result["errors"]
 
 
-def test_validate_strategy_unknown_fields_permissive():
-    """Unbekannte Sektionen/Felder werden ignoriert (permissive, Strategie-Evolution)."""
+def test_validate_strategy_unknown_fields_fail_closed():
+    """Unbekannte Sektionen/Felder schlagen fehl (fail-closed statt permissive)."""
     strategy = {
         **REAL_STRATEGY,
         "future_section": {"x": 1},
         "portfolio": {**REAL_STRATEGY["portfolio"], "neues_feld": 123},
     }
     result = analyze.validate_strategy(strategy)
-    assert result["valid"] is True
-    assert result["errors"] == []
+    assert result["valid"] is False
+    assert "Unbekannte Sektion 'future_section'" in " ".join(result["errors"])
+    assert "Unbekanntes Feld 'portfolio.neues_feld'" in " ".join(result["errors"])
+
+
+# --- Sparplan-Trade-Limit (Plan Phase 4) --------------------------------------
+
+
+def _txn(isin: str, txn_type: str, executed_at: str) -> dict:
+    return {
+        "isin": isin,
+        "transaction_type": txn_type,
+        "executed_at": executed_at,
+        "quantity": 1.0,
+        "amount_eur": 100.0,
+        "side": "BUY",
+    }
+
+
+def test_trades_in_quarter_excludes_sparplan():
+    """Nur manuelle Kaufe/Verkaufe zaehlen zum Quartals-Trade-Limit (Plan Phase 4)."""
+    quarter = "2026-Q3"
+    txns = [
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00"),
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-15T08:00:00+00:00"),
+        _txn("IE00BK5BQT80", "sparplan", "2026-09-01T08:00:00+00:00"),
+        _txn("IE00BK5BQT80", "sparplan", "2026-09-15T08:00:00+00:00"),
+        _txn("IE00BK5BQT80", "sparplan", "2026-09-30T08:00:00+00:00"),
+    ]
+    result = analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)
+    assert result["trade_count"] == 0  # Sparplaene zaehlen NICHT
+    assert result["status"] == "green"
+
+    # 5 Sparplaene + 1 manueller Kauf -> genau 1 diskretionaerer Trade
+    result_mixed = analyze.calculate_trades_in_quarter(
+        txns + [_txn("US0378331005", "kauf", "2026-08-10T08:00:00+00:00")],
+        quarter=quarter,
+        strategy=REAL_STRATEGY,
+    )
+    assert result_mixed["trade_count"] == 1
+    assert result_mixed["status"] == "green"
+
+
+def test_is_trade_still_counts_sparplan_for_turnover():
+    """Sparplaene bleiben Trades im Umschlag-Sinn (nur das Trade-Limit ist entlastet)."""
+    sparplan = _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00")
+    assert analyze._is_trade(sparplan) is True
+    assert analyze._is_discretionary_trade(sparplan) is False
+    assert analyze._is_discretionary_trade(_txn("US0378331005", "kauf", "2026-08-01T08:00:00+00:00")) is True
+    assert analyze._is_discretionary_trade(_txn("US0378331005", "verkauf", "2026-08-01T08:00:00+00:00")) is True
+
+
+# --- Trade-Klassifikation (Plan Phase 3): Instrument-bewusst + transparent -----
+
+
+def test_classify_trade_distinguishes_classes():
+    """Klare Trennung: manuelle Trades vs. Sparplan vs. Cash vs. unklar."""
+    assert analyze.classify_trade(_txn("US0378331005", "kauf", "2026-08-01T08:00:00+00:00")) == analyze.TRADE_CLASS_SATELLITE
+    assert analyze.classify_trade(_txn("US0378331005", "verkauf", "2026-08-01T08:00:00+00:00")) == analyze.TRADE_CLASS_SATELLITE
+    assert analyze.classify_trade(_txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00")) == analyze.TRADE_CLASS_SPARPLAN
+    # Legacy-Formate bleiben manuelle Trades
+    legacy_buy = {"date": "2026-08-01", "isin": "US0378331005", "type": "buy"}
+    assert analyze.classify_trade(legacy_buy) == analyze.TRADE_CLASS_SATELLITE
+    side_buy = {"isin": "US0378331005", "side": "BUY"}
+    assert analyze.classify_trade(side_buy) == analyze.TRADE_CLASS_SATELLITE
+    # Cash-Bewegung ist kein Trade
+    assert analyze.classify_trade(_txn("US0378331005", "einzahlung", "2026-08-01T08:00:00+00:00")) == analyze.TRADE_CLASS_NON_TRADE
+    # Unklar -> eigene Klasse (fail-closed)
+    assert analyze.classify_trade({"isin": "US0378331005"}) == analyze.TRADE_CLASS_UNCLEAR
+
+
+def test_sparplan_detection_from_sc_raw_savings_plan():
+    """sc-Rohformat security_transaction_type=SAVINGS_PLAN -> Sparplan (nicht Trade)."""
+    raw = {"isin": "IE00BK5BQT80", "security_transaction_type": "SAVINGS_PLAN", "side": "BUY"}
+    assert analyze.classify_trade(raw) == analyze.TRADE_CLASS_SPARPLAN
+    assert analyze._is_discretionary_trade(raw) is False
+
+
+def test_etf_instrument_kind_and_category():
+    """Instrument-Klasse: ETF vs. Aktie; ETF-Kategorie core/satellite aus etf_lookup."""
+    core_etf = _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00")
+    assert analyze._txn_instrument_kind(core_etf) == "etf"
+    assert analyze._txn_etf_category(core_etf) == "core"
+    sat_etf = _txn("IE00B8GKDB10", "kauf", "2026-08-01T08:00:00+00:00")
+    assert analyze._txn_instrument_kind(sat_etf) == "etf"
+    assert analyze._txn_etf_category(sat_etf) == "satellite"
+    stock = _txn("US0378331005", "kauf", "2026-08-01T08:00:00+00:00")
+    assert analyze._txn_instrument_kind(stock) == "aktie"
+    assert analyze._txn_etf_category(stock) == "unknown"
+
+
+def test_trades_in_quarter_breaks_down_sparplan_and_unclear():
+    """Transparente Klassifikation: Sparplan separat, unklar fail-closed + ausgewiesen."""
+    quarter = "2026-Q3"
+    txns = [
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00"),
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-15T08:00:00+00:00"),
+        _txn("US0378331005", "kauf", "2026-08-10T08:00:00+00:00"),
+        _txn("US0378331005", "einzahlung", "2026-08-11T08:00:00+00:00"),
+        {"isin": "DK0062498333", "executed_at": "2026-08-12T08:00:00+00:00"},  # unklar
+    ]
+    result = analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)
+    assert result["trade_count"] == 2  # 1 manueller Kauf + 1 unklarer (fail-closed)
+    assert result["sparplan_count"] == 2  # separat klassifiziert
+    assert result["unclear_count"] == 1
+    assert result["unclear"][0]["isin"] == "DK0062498333"
+    assert result["status"] == "green"  # 2 < 5
+
+
+def test_trades_in_quarter_all_sparplan_etf_renten_green():
+    """Core-ETF-Sparplaene/Rentenanlage: kein Satellite-Trade-Limit-Verbrauch."""
+    quarter = "2026-Q3"
+    txns = [
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00"),  # Core-ETF
+        _txn("IE00B4L5Y983", "sparplan", "2026-08-15T08:00:00+00:00"),  # Core-ETF
+        _txn("IE00B8GKDB10", "sparplan", "2026-09-01T08:00:00+00:00"),  # Satellite-ETF-Sparplan
+        _txn("DE000A1EWWW0", "sparplan", "2026-09-15T08:00:00+00:00"),  # Rentenanlage (unbekannt im Lookup, trotzdem Sparplan)
+        _txn("IE00BK5BQT80", "sparplan", "2026-09-30T08:00:00+00:00"),
+    ]
+    result = analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)
+    assert result["trade_count"] == 0
+    assert result["sparplan_count"] == 5
+    assert result["status"] == "green"
+
+
+def test_trades_in_quarter_boundary_yellow_at_limit_red_over():
+    """Trade-Limit-Ampel: genau am Limit gelb, darueber rot (nur diskretionaere)."""
+    quarter = "2026-Q3"
+    txns = [_txn(f"US{i:09d}", "kauf", f"2026-08-0{i+1}T08:00:00+00:00") for i in range(5)]
+    result = analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)
+    assert result["trade_count"] == 5
+    assert result["status"] == "yellow"  # Limit erreicht
+
+    result_over = analyze.calculate_trades_in_quarter(
+        txns + [_txn("US0378331005", "kauf", "2026-08-20T08:00:00+00:00")],
+        quarter=quarter,
+        strategy=REAL_STRATEGY,
+    )
+    assert result_over["trade_count"] == 6
+    assert result_over["status"] == "red"  # Limit ueberschritten
+
+
+def test_trades_in_quarter_manual_core_etf_kauf_still_counts():
+    """Manueller Kauf eines Core-ETF bleibt ein Satellite-Trade (nur Sparplan ist entlastet)."""
+    quarter = "2026-Q3"
+    result = analyze.calculate_trades_in_quarter(
+        [_txn("IE00BK5BQT80", "kauf", "2026-08-01T08:00:00+00:00")],  # Core-ETF, aber manuell
+        quarter=quarter,
+        strategy=REAL_STRATEGY,
+    )
+    assert result["trade_count"] == 1  # Entlastung gilt dem Sparplan-Mechanismus, nicht der Core-Kategorie
+    assert result["status"] == "green"
+
+
+def test_trades_in_quarter_only_counts_current_quarter():
+    """Nur Transaktionen im Ziel-Quartal zaehlen (Sparplan-Zaehler ebenso)."""
+    quarter = "2026-Q3"
+    result = analyze.calculate_trades_in_quarter(
+        [
+            _txn("US0378331005", "kauf", "2026-06-15T08:00:00+00:00"),  # Q2 -> ignoriert
+            _txn("IE00BK5BQT80", "sparplan", "2026-06-01T08:00:00+00:00"),  # Q2 -> ignoriert
+            _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00"),  # Q3 -> Sparplan
+        ],
+        quarter=quarter,
+        strategy=REAL_STRATEGY,
+    )
+    assert result["trade_count"] == 0
+    assert result["sparplan_count"] == 1
+
+
+def test_trades_in_quarter_unclear_fail_closed_visible_at_boundary():
+    """Unklare Trades zaehlen fail-closed zum Limit und sind transparent ausgewiesen."""
+    quarter = "2026-Q3"
+    txns = [_txn(f"US{i:09d}", "kauf", f"2026-08-0{i+1}T08:00:00+00:00") for i in range(5)]
+    txns.append({"isin": "DK0062498333", "executed_at": "2026-08-20T08:00:00+00:00"})  # unklar
+    result = analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)
+    assert result["trade_count"] == 6  # 5 manuell + 1 unklar (fail-closed)
+    assert result["unclear_count"] == 1
+    assert result["unclear"][0]["isin"] == "DK0062498333"
+    assert result["status"] == "red"  # unklar schiebt ueber das Limit
+
+
+def test_trades_in_quarter_traffic_light_surfaces_classification():
+    """Ampel 'Trades/Quartal' spiegelt trade_count + transparente Klassifikation."""
+    quarter = "2026-Q3"
+    txns = [
+        _txn("IE00BK5BQT80", "sparplan", "2026-08-01T08:00:00+00:00"),
+        _txn("US0378331005", "kauf", "2026-08-10T08:00:00+00:00"),
+    ]
+    checks = {"trades_per_quarter": analyze.calculate_trades_in_quarter(txns, quarter=quarter, strategy=REAL_STRATEGY)}
+    lights = analyze.build_traffic_lights({"checks": checks}, REAL_STRATEGY)
+    assert lights["trades_per_quarter"]["status"] == "green"
+    assert "1 Trades im Quartal" in lights["trades_per_quarter"]["reason"]
+
+
+# --- Watchlist-/Satellite-Signale (Plan Phase 3: 4 Dimensionen, deterministisch) ---
+#
+# Signal-Labels: BUY / SELL / AVOID / WATCH / NO SIGNAL. Fundamentaldaten
+# werden nie verwendet (fundamentals_used: false). Harte Ausschlussregeln:
+# Core-ETFs und SUSE/LU2722255754 (illiquide Legacy) -> NO SIGNAL.
+# SELL nur fuer bestehende Satellite-Positionen.
+
+_SIGNAL_STRATEGY = {
+    **REAL_STRATEGY,
+    "sectors": {"preferred": ["technology", "ai", "energy"], "excluded": ["fossil_fuels", "defense"]},
+}
+
+_SIGNAL_PORTFOLIO = {
+    "total_value_eur": 10000.0,
+    "holdings": [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "category": "core", "value_eur": 7000.0},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "sector": "technology"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 2000.0, "sector": "technology"},
+    ],
+}
+
+
+def _signal_analysis(positions: list | None = None) -> dict:
+    if positions is None:
+        positions = [
+            {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 2000.0, "weight": 0.2},
+            {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.1},
+        ]
+    return {"checks": {"positions": {"positions": positions}, "sector_concentration": {}, "single_position": {}}}
+
+
+def _nvidia_item(category: str = "satellite") -> dict:
+    """Watchlist-Item NVIDIA (technologie-praeferiert, aus tests/mock_data/watchlist.json)."""
+    return {
+        "isin": "US5949724083",
+        "name": "NVIDIA Corp.",
+        "ticker": "NVDA",
+        "category": category,
+        "sector": "technology",
+        "valuation": 1250.0,
+        "valuation_currency": "EUR",
+        "value_eur": 1250.0,
+    }
+
+
+def test_signal_buy_preferred_sector_positive_news():
+    """BUY: Score >= +3, D1 >= 0 — praeferierter Sektor + positive News.
+
+    Kandidat ist NICHT im Portfolio (kein Holding -> D2 +1), kleiner
+    Positionswert (unter max_position_pct), Sektor unter max_sector_pct.
+    """
+    buy_portfolio = {
+        "total_value_eur": 20000.0,
+        "holdings": [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "category": "core", "value_eur": 20000.0},
+        ],
+    }
+    item = _nvidia_item()
+    item["value_eur"] = 500.0  # 2.5% — unter max_position_pct 5%
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        buy_portfolio,
+        _signal_analysis([]),
+        news=[{"title": "NVIDIA meldet Rekord-Gewinn und starkes Wachstum", "summary": "", "source": "test"}],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["signal"] == analyze.SIGNAL_BUY
+    assert sig["score"] >= 3
+    assert sig["fundamentals_used"] is False
+    assert sig["dimensions"]["strategy_fit"] >= 0
+    assert sig["dimensions"]["news_sentiment"] == 1
+
+
+def test_signal_excluded_sector_is_avoid():
+    """AVOID: Score <= -2 und D1 == -1 (Sektor ausgeschlossen)."""
+    item = {
+        "isin": "US1234567890",
+        "name": "Fossil Co.",
+        "category": "satellite",
+        "sector": "fossil_fuels",
+        "value_eur": 1000.0,
+    }
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        {"total_value_eur": 10000.0, "holdings": []},
+        _signal_analysis([]),
+        news=[{"title": "Verlust und Absturz bei Fossil Co.", "summary": "", "source": "test"}],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["signal"] == analyze.SIGNAL_AVOID
+    assert sig["score"] <= -2
+    assert sig["dimensions"]["strategy_fit"] == -1
+
+
+def test_signal_separates_sell_from_watchlist():
+    """SELL nur fuer bestehende Satellite-Holdings, nie fuer Watchlist-Neu.
+
+    3M (Sektor industrials, neutral) als bestehende Satellite-Holding mit
+    negativer News -> D1 0, D2 -1, D3 -1 -> Score -2 -> SELL. Als
+    Watchlist-Neu (nicht gehalten) -> D2 +1 -> Score 0 -> WATCH, nie SELL.
+    """
+    item = {
+        "isin": "US88579Y1010",
+        "name": "3M Co.",
+        "ticker": "MMM",
+        "category": "satellite",
+        "sector": "industrials",
+        "value_eur": 1000.0,
+    }
+    news = [{"title": "MMM (3M Co.) verliert weiter — Absturz und Verlustwarnung", "summary": "", "source": "test"}]
+    # Bestehende Satellite-Holding (3M im Portfolio) -> SELL moeglich.
+    sell_portfolio = {
+        "total_value_eur": 10000.0,
+        "holdings": [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "category": "core", "value_eur": 7000.0},
+            {"isin": "US88579Y1010", "name": "3M Co.", "category": "satellite", "value_eur": 1000.0, "sector": "industrials"},
+        ],
+    }
+    sell_signals = analyze.compute_watchlist_signals(
+        [dict(item)],
+        sell_portfolio,
+        _signal_analysis(),
+        news=news,
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert any(s["signal"] == analyze.SIGNAL_SELL for s in sell_signals)
+
+    # Watchlist-Kandidat (nicht im Portfolio) -> WATCH, nie SELL.
+    watch_portfolio = {"total_value_eur": 10000.0, "holdings": []}
+    watch_signals = analyze.compute_watchlist_signals(
+        [dict(item)],
+        watch_portfolio,
+        _signal_analysis([]),
+        news=news,
+        strategy=_SIGNAL_STRATEGY,
+    )
+    sig = watch_signals[0]
+    assert sig["signal"] == analyze.SIGNAL_WATCH
+    assert sig["signal"] != analyze.SIGNAL_SELL
+
+
+def test_signal_core_etf_no_signal():
+    """Harte Ausschlussregel: Core-ETFs bekommen NO SIGNAL (kein Trade-Kandidat)."""
+    core_etf = {
+        "isin": "IE00BK5BQT80",
+        "name": "Vanguard FTSE All-World UCITS ETF",
+        "category": "core",
+        "sector": "Diversified",
+    }
+    signals = analyze.compute_watchlist_signals(
+        [core_etf],
+        {"total_value_eur": 10000.0, "holdings": []},
+        _signal_analysis([]),
+        news=[],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["signal"] == analyze.SIGNAL_NO_SIGNAL
+    assert sig["excluded"] is True
+    assert sig["score"] == 0
+    assert sig["dimensions"] == {}
+
+
+def test_signal_suse_legacy_no_signal():
+    """SUSE/LU2722255754 (illiquide Legacy) -> NO SIGNAL, nie BUY/SELL."""
+    suse = {"isin": "LU2722255754", "name": "SUSE", "category": "unknown", "sector": "software"}
+    signals = analyze.compute_watchlist_signals(
+        [suse],
+        {"total_value_eur": 10000.0, "holdings": []},
+        _signal_analysis([]),
+        news=[],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["signal"] == analyze.SIGNAL_NO_SIGNAL
+    assert sig["excluded"] is True
+
+
+def test_signal_no_signal_when_too_few_dimensions():
+    """NO SIGNAL bei weniger als 3 nicht-None-Dimensionen (fail-closed)."""
+    item = {"isin": "DE000A3E00M1", "name": "IONOS Group SE", "category": "unknown", "sector": "technology"}
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        {"total_value_eur": 10000.0, "holdings": []},
+        _signal_analysis([]),
+        news=[],
+        strategy=_SIGNAL_STRATEGY,
+        previous_snapshot=None,
+        current_captured_at=None,
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["signal"] == analyze.SIGNAL_NO_SIGNAL
+    assert sig["dimensions"]["strategy_fit"] is None  # unknown-Kategorie -> fail-closed
+
+
+def test_signal_mixed_news_is_neutral():
+    """Gemischt positive+negative News -> D3 = 0 (kein klares Signal)."""
+    item = _nvidia_item()
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        _SIGNAL_PORTFOLIO,
+        _signal_analysis(),
+        news=[{"title": "NVIDIA Gewinn-Rekord, aber Klage gegen Firma", "summary": "", "source": "test"}],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert signals[0]["dimensions"]["news_sentiment"] == 0
+
+
+def test_signal_existing_holding_has_negative_portfolio_fit():
+    """D2 Portfolio-Fit: bereits vorhandene Holding -> -1 (kein Add noetig)."""
+    item = _nvidia_item()
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        _SIGNAL_PORTFOLIO,
+        _signal_analysis(),
+        news=[],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert signals[0]["dimensions"]["portfolio_fit"] == -1
+
+
+def test_signal_etf_diversified_sector_is_neutral_not_unknown():
+    """Satellite-ETF (Diversified) -> D1 = 0 statt None (kein Sektor-Signal)."""
+    sat_etf = {
+        "isin": "IE00B8GKDB10",
+        "name": "Vanguard S&P 500 UCITS ETF",
+        "category": "satellite",
+        "sector": "Diversified",
+    }
+    signals = analyze.compute_watchlist_signals(
+        [sat_etf],
+        {"total_value_eur": 10000.0, "holdings": []},
+        _signal_analysis([]),
+        news=[],
+        strategy=_SIGNAL_STRATEGY,
+    )
+    assert signals[0]["dimensions"]["strategy_fit"] == 0
+
+
+def test_signal_news_sentiment_matches_ticker_and_isin():
+    """D3-News-Matching via ISIN/Ticker/Name (deterministische Keywords)."""
+    item = _nvidia_item()
+    assert analyze._signal_item_news(
+        item,
+        [
+            {"title": "NVIDIA kündigt neues Rechenzentrum an", "summary": ""},
+            {"title": "US5949724083 Quartalszahlen", "summary": ""},
+        ],
+    )
+    assert not analyze._signal_item_news(item, [{"title": "Apple gewinnt Marktanteile", "summary": ""}])
+
+
+# --- D4: aktuelle sc-Kurs-/Kursentwicklung aus dem Vorgaenger-Snapshot ---
+
+def _prev_snapshot(isin: str, value_eur: float) -> dict:
+    """Vorgaenger-Snapshot mit genau einer Holding (nur Kurs-/Wertdaten)."""
+    return {
+        "captured_at": "2026-08-13T14:00:00+00:00",
+        "portfolio": {"holdings": [{"isin": isin, "value_eur": value_eur, "quantity": 10}]},
+    }
+
+
+def test_signal_price_development_positive():
+    """D4 = +1 bei Kursanstieg gegenueber Vorgaenger-Snapshot (sc-Kursdaten)."""
+    item = _nvidia_item()
+    item["value_eur"] = 1300.0
+    assert analyze._dimension_price_development(item, _prev_snapshot("US5949724083", 1000.0), "2026-08-20T14:00:00+00:00") == 1
+
+
+def test_signal_price_development_negative():
+    """D4 = -1 bei Kursabfall gegenueber Vorgaenger-Snapshot (sc-Kursdaten)."""
+    item = _nvidia_item()
+    item["value_eur"] = 900.0
+    assert analyze._dimension_price_development(item, _prev_snapshot("US5949724083", 1000.0), "2026-08-20T14:00:00+00:00") == -1
+
+
+def test_signal_price_development_stagnant():
+    """D4 = 0 bei stagnierendem Kurs (Aenderung innerhalb +-0.5%)."""
+    item = _nvidia_item()
+    item["value_eur"] = 1001.0
+    assert analyze._dimension_price_development(item, _prev_snapshot("US5949724083", 1000.0), "2026-08-20T14:00:00+00:00") == 0
+
+
+def test_signal_price_development_fail_closed_without_previous():
+    """D4 = None ohne Vorgaenger-Snapshot oder ohne Kursdaten (fail-closed)."""
+    item = _nvidia_item()
+    item["value_eur"] = 1300.0
+    assert analyze._dimension_price_development(item, None, "2026-08-20T14:00:00+00:00") is None
+    assert analyze._dimension_price_development(item, _prev_snapshot("US5949724083", 1000.0), None) is None
+    # Andere ISIN im Vorgaenger -> keine Vergleichsbasis -> None.
+    assert analyze._dimension_price_development(item, _prev_snapshot("US0378331005", 1000.0), "2026-08-20T14:00:00+00:00") is None
+
+
+def test_signal_price_development_feeds_sell():
+    """D4 wirkt auf den Score: bestehende Satellite-Holding mit negativer
+    Kursentwicklung und negativen News -> Score <= -2 -> SELL (D2 == -1)."""
+    item = {
+        "isin": "US5949724083",
+        "name": "NVIDIA Corp.",
+        "category": "satellite",
+        "sector": "technology",
+        "value_eur": 900.0,
+    }
+    sell_portfolio = {
+        "total_value_eur": 10000.0,
+        "holdings": [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "category": "core", "value_eur": 7000.0},
+            {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 2000.0, "sector": "technology"},
+        ],
+    }
+    signals = analyze.compute_watchlist_signals(
+        [item],
+        sell_portfolio,
+        _signal_analysis(),
+        news=[{"title": "NVIDIA Verlust und Absturz", "summary": "", "source": "test"}],
+        strategy=_SIGNAL_STRATEGY,
+        previous_snapshot=_prev_snapshot("US5949724083", 1000.0),
+        current_captured_at="2026-08-20T14:00:00+00:00",
+    )
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig["dimensions"]["price_development"] == -1
+    assert sig["signal"] == analyze.SIGNAL_SELL
