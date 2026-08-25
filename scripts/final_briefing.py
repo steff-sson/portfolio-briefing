@@ -25,6 +25,8 @@ nicht automatisch verfuegbar und fliessen nie in ein Signal).
 """
 from __future__ import annotations
 
+import re
+
 # Die sieben verbindlichen Briefing-Kategorien in fester Reihenfolge —
 # identisch zu analyze.TRAFFIC_LIGHT_CATEGORIES, hier ohne Import-Zyklus
 # bewusst als Konstante dupliziert (fachlicher Contract, Plan §6a).
@@ -177,19 +179,64 @@ def _section_kurzlage(summary: dict, data_quality: dict | None) -> str:
         f"- Grüne Punkte: {green_names}.",
         f"- Datenqualität: {dq_text}.",
     ]
+    # Positionsvorschläge (Top-3) kompakt als Bullet-Zeilen nach den Ampel-
+    # Zeilen — 1:1 aus deterministic_summary.position_actions (deterministisch,
+    # keine Gegenargumente/Risiken in der Kurzlage; das bleibt in
+    # ## Entscheidungsrelevante Punkte).
+    for action in _as_list(summary.get("position_actions"))[:3]:
+        if not isinstance(action, dict):
+            continue
+        act = _safe_str(action.get("action"))
+        isin = _safe_str(action.get("isin"))
+        name = _safe_str(action.get("name"))
+        lines.append(f"- Positionsvorschlag: {act} — {name} ({isin}).")
     return "\n".join(lines)
 
 
-def _section_datenqualitaet(data_quality: dict | None) -> str:
-    """Datenqualität: Status + Issues (aus dem Faktenpaket, nie erfunden)."""
+def _section_datenqualitaet(
+    data_quality: dict | None,
+    holdings: list | None = None,
+    signals: dict | None = None,
+) -> str:
+    """Datenqualität: Status + Issues (aus dem Faktenpaket, nie erfunden).
+
+    Zusaetzlich Datenqualitaets-Hinweise (non-blocking):
+    - Holdings ohne ISIN oder mit ungueltiger ISIN (kein
+      ``[A-Z]{2}[A-Z0-9]{9}\\d``-Format) werden sichtbar als
+      ``- ISIN nicht gefunden: {name}`` markiert — nie stillschweigend als
+      gueltig behandelt.
+    - Signal-ISINs mit ungueltigem Format erscheinen als
+      ``- ISIN nicht gefunden: {isin}``. Gueltige Signal-ISINs (z.B.
+      Watchlist-Kaufkandidaten wie NVIDIA) sind bekannt und KEIN Hinweis.
+    """
     dq = _as_dict(data_quality)
     status = dq.get("status")
     if status in (None, "", "ok"):
-        return "Datenqualität: ok."
-    issues = _as_list(dq.get("issues"))
-    if issues:
-        return "Datenqualität: " + _safe_str(status) + " — " + "; ".join(_safe_str(i) for i in issues) + "."
-    return "Datenqualität: " + _safe_str(status) + "."
+        lines = ["Datenqualität: ok."]
+    else:
+        issues = _as_list(dq.get("issues"))
+        if issues:
+            lines = ["Datenqualität: " + _safe_str(status) + " — " + "; ".join(_safe_str(i) for i in issues) + "."]
+        else:
+            lines = ["Datenqualität: " + _safe_str(status) + "."]
+    # Holdings ohne/ungueltige ISIN → Datenqualitäts-Hinweis (nie stillschweigend gültig).
+    for h in (holdings or []):
+        if not isinstance(h, dict):
+            continue
+        isin = _safe_str(h.get("isin"))
+        if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", isin):
+            name = _safe_str(h.get("name")) or "unbekannte Position"
+            lines.append(f"- ISIN nicht gefunden: {name}")
+    # Signal-ISINs mit ungueltigem Format → Datenqualitäts-Hinweis (gueltige
+    # Signal-ISINs sind bekannte Kaufkandidaten/Sell-Kandidaten, KEIN Hinweis).
+    for key in ("watchlist_signals", "satellite_sell_signals"):
+        for s in _as_list((signals or {}).get(key)):
+            if not isinstance(s, dict):
+                continue
+            isin = _safe_str(s.get("isin"))
+            if isin and not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", isin):
+                lines.append(f"- ISIN nicht gefunden: {isin}")
+    return "\n".join(lines)
 
 
 def _section_entscheidungsrelevante_punkte(summary: dict) -> str:
@@ -386,6 +433,11 @@ def _section_sell_reduce_signals(summary: dict) -> str:
     SUSE/Legacy sind ausgeschlossen). Keine Core-ETFs, keine SUSE.
     """
     signals = _as_list(summary.get("satellite_sell_signals"))
+    # Defensiver Filter: nur echte Satellite-SELL/REDUCE-Signale rendern
+    # (excluded=True markiert Core-ETFs/SUSE-Legacy; die Fakten-Lane filtert
+    # bereits, dieser Renderer-Filter schuetzt zusaetzlich gegen
+    # regressierte/unkonforme Faktenpakete — nie Core-ETFs, nie SUSE).
+    signals = [s for s in signals if isinstance(s, dict) and not s.get("excluded")]
     if not signals:
         return "Keine Sell-/Reduce-Signale.\n\n" + FUNDAMENTALS_DISCLAIMER
     lines = [_signal_line(s) for s in signals[:3] if isinstance(s, dict)]
@@ -419,17 +471,47 @@ def _section_watchlist_signals(summary: dict) -> str:
 def _section_naechster_schritt(summary: dict) -> str:
     """Naechster Schritt: deterministisch aus den Signalen (keine Thesen).
 
-    - SELL/REDUCE auf bestehenden Satellites -> "SUSE/Legacy ignorieren,
-      SELL prüfen, ggf. manuell ausführen."
+    - SELL auf bestehenden Satellites -> "SUSE/Legacy ignorieren, SELL
+      prüfen, ggf. manuell ausführen." (haertestes Signal, zuerst).
+    - REDUCE auf bestehenden Satellites -> "REDUCE-Signale prüfen, ggf.
+      manuell reduzieren." (eigenes Signal, explizit adressiert — REDUCE
+      ist kein SELL und darf nicht als SELL formuliert werden).
     - BUY auf der Watchlist -> "Watchlist-Position prüfen, ggf. manuell kaufen."
+    - Positionsvorschlaege (Top-3) -> REDUCE-Vorschlag: "REDUCE-Vorschläge aus
+      Positionsvorschlägen prüfen, ggf. manuell reduzieren." / BUY-Vorschlag:
+      "BUY-Vorschläge aus Positionsvorschlägen prüfen, ggf. manuell kaufen."
+      (nur wenn keine SELL/REDUCE/BUY-Signale vorliegen).
     - Sonst -> "Nächste Woche neuer Lauf, keine Aktion erforderlich."
+      ("Keine Aktion" nur ohne SELL/REDUCE/BUY-Signale und ohne
+      Positionsvorschlaege.)
+
+    Reihenfolge/Prioritaet: SELL > REDUCE > BUY (das jeweils haerteste
+    Signal bestimmt den Text) > Positionsvorschlaege (REDUCE vor BUY). Die
+    Signal-Listen selbst sind bereits gefiltert (nur echte Satellite-SELL/
+    REDUCE ohne Core-ETF/SUSE-Ausschluss, facts._split_satellite_sell_signals).
     """
     sell = _as_list(summary.get("satellite_sell_signals"))
     watch = _as_list(summary.get("watchlist_signals"))
-    if any(isinstance(s, dict) and s.get("signal") in ("SELL", "REDUCE") for s in sell):
+    # Gleich wie _section_sell_reduce_signals: excluded=True (Core-ETF/
+    # SUSE-Legacy) nie als Handlungssignal werten (Rendering + Naechster
+    # Schritt bleiben konsistent mit den facts-Ausschlussregeln).
+    sell = [s for s in sell if isinstance(s, dict) and not s.get("excluded")]
+    if any(isinstance(s, dict) and s.get("signal") == "SELL" for s in sell):
         return "SUSE/Legacy ignorieren, SELL prüfen, ggf. manuell ausführen."
+    if any(isinstance(s, dict) and s.get("signal") == "REDUCE" for s in sell):
+        return "REDUCE-Signale prüfen, ggf. manuell reduzieren."
     if any(isinstance(s, dict) and s.get("signal") == "BUY" for s in watch):
         return "Watchlist-Position prüfen, ggf. manuell kaufen."
+    actions = _as_list(summary.get("position_actions"))
+    if any(isinstance(a, dict) and a.get("action") == "REDUCE" for a in actions):
+        return "REDUCE-Vorschläge aus Positionsvorschlägen prüfen, ggf. manuell reduzieren."
+    if any(isinstance(a, dict) and a.get("action") == "BUY" for a in actions):
+        return "BUY-Vorschläge aus Positionsvorschlägen prüfen, ggf. manuell kaufen."
+    actions_de = _as_list(summary.get("position_actions"))
+    if any(isinstance(a, dict) and a.get("action") == "reduzieren" for a in actions_de):
+        return "REDUCE-Vorschläge aus Positionsvorschlägen prüfen, ggf. manuell reduzieren."
+    if any(isinstance(a, dict) and a.get("action") == "aufstocken" for a in actions_de):
+        return "BUY-Vorschläge aus Positionsvorschlägen prüfen, ggf. manuell kaufen."
     return "Nächste Woche neuer Lauf, keine Aktion erforderlich."
 
 
@@ -457,7 +539,7 @@ def render_final_briefing(facts_package: dict, mode: str = "monday") -> str:
 
     sections = [
         ("Kurzlage", _section_kurzlage(summary, data_quality)),
-        ("Datenqualität", _section_datenqualitaet(data_quality)),
+        ("Datenqualität", _section_datenqualitaet(data_quality, package.get("portfolio", {}).get("holdings", []), summary)),
         ("Sell-/Reduce-Signale (bestehende Satellites)", _section_sell_reduce_signals(summary)),
         ("Watchlist-Signale", _section_watchlist_signals(summary)),
         ("Nächster Schritt", _section_naechster_schritt(summary)),

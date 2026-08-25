@@ -161,6 +161,40 @@ def _position_actions(facts_package: dict) -> list:
     return actions if isinstance(actions, list) else []
 
 
+def _non_excluded_action_signals(facts_package: dict, labels: tuple) -> list:
+    """Signal-Objekte mit Signal-Label in ``labels``, ohne excluded-Marker.
+
+    Gleiche Ausschlussregel wie der Renderer (final_briefing
+    _section_naechster_schritt/_section_sell_reduce_signals): excluded=True
+    markiert Core-ETFs/SUSE-Legacy — die zaehlen nie als Handlungssignal.
+    """
+    summary = facts_package.get("deterministic_summary", {})
+    result: list[dict] = []
+    for signal in summary.get("satellite_sell_signals", []) if isinstance(summary.get("satellite_sell_signals"), list) else []:
+        if isinstance(signal, dict) and not signal.get("excluded") and signal.get("signal") in labels:
+            result.append(signal)
+    for signal in summary.get("watchlist_signals", []) if isinstance(summary.get("watchlist_signals"), list) else []:
+        if isinstance(signal, dict) and not signal.get("excluded") and signal.get("signal") in labels:
+            result.append(signal)
+    return result
+
+
+def _naechster_schritt_handlungsbedarf(facts_package: dict) -> bool:
+    """Konkrete Handlungssignale fuer die no-action-Regel (Phase 5)?
+
+    Deckt sich 1:1 mit dem Renderer-Contract (final_briefing
+    _section_naechster_schritt): SELL/REDUCE auf bestehenden Satellites,
+    BUY auf der Watchlist oder nicht-leere position_actions. Nur diese
+    Signale erzeugen konkreten Handlungstext — rote/gelbe Checks allein
+    sind keine Handlungsempfehlung und blocken die no-action-Phrase nicht.
+    """
+    if _position_actions(facts_package):
+        return True
+    if _non_excluded_action_signals(facts_package, ("SELL", "REDUCE", "BUY")):
+        return True
+    return False
+
+
 def _extract_recommendation_label(text: str) -> str | None:
     """Genau ein Label (BUY|SELL|WATCH) in der '## Empfehlung'-Sektion."""
     section = _extract_section(text, RECOMMENDATION_SECTION)
@@ -750,6 +784,35 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
             )
         )
 
+    # 2a. Naechster-Schritt-Konformitaet (Phase 5): "Keine Aktion erforderlich"
+    #     in der "## Naechster Schritt"-Sektion blockt als critical, wenn das
+    #     Faktenpaket KONKRETE Handlungssignale ausweist (deterministischer
+    #     Renderer-Contract final_briefing._section_naechster_schritt):
+    #     - nicht-excluded SELL/REDUCE in satellite_sell_signals,
+    #     - BUY in watchlist_signals,
+    #     - nicht-leere position_actions.
+    #     Rote/gelbe Checks ALLEIN sind KEINE konkrete Handlungsempfehlung —
+    #     sie blocken die no-action-Phrase nicht (nur die Kurzlage-
+    #     Konformitaetsphrase in Schritt 2 reagiert auf rote/gelbe Checks).
+    #     Der Renderer wuerde in diesen Faellen SELL/REDUCE/BUY/Vorschlags-
+    #     Text erzeugen — ein Draft mit no-action-Phrase trotzdem ist ein
+    #     Widerspruch (fail-closed).
+    naechster = _section_content(_extract_section(text, NEXT_STEP_SECTION)) or ""
+    naechster_lower = naechster.lower()
+    if "keine aktion erforderlich" in naechster_lower and _naechster_schritt_handlungsbedarf(
+        facts_package
+    ):
+        findings.append(
+            _finding(
+                "critical",
+                "'Keine Aktion erforderlich' trotz Handlungsbedarf",
+                f"position_actions={len(_position_actions(facts_package))}, "
+                f"sell_signals={_non_excluded_action_signals(facts_package, ('SELL', 'REDUCE'))}, "
+                f"buy_signals={_non_excluded_action_signals(facts_package, ('BUY',))}",
+                "Nächster Schritt konkret adressieren (SELL/REDUCE/BUY/Vorschlag)",
+            )
+        )
+
     # 3. Stil-Gates (nicht-lockernd): rohe snake_case-Checknamen blocken als
     #    critical (technische Bezeichner duerfen nie im Markdown stehen),
     #    verbotene Fachbegriffe als major. Deutsche Lesarten sind erlaubt
@@ -797,6 +860,15 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     holdings = facts_package.get("portfolio", {}).get("holdings", [])
     portfolio_tickers = {h.get("ticker", "") for h in holdings if h.get("ticker")}
     portfolio_isins = {h.get("isin", "") for h in holdings if h.get("isin")}
+    # Signal-ISINs (Watchlist-Kandidaten + Satellite-SELLs) sind legitim im
+    # Draft — 1:1 aus deterministic_summary, per Renderer (final_briefing
+    # _section_watchlist_signals/_section_sell_reduce_signals) gerendert.
+    signal_isins = {
+        str(s.get("isin", ""))
+        for key in ("watchlist_signals", "satellite_sell_signals")
+        for s in (summary.get(key, []) if isinstance(summary.get(key), list) else [])
+        if isinstance(s, dict) and s.get("isin")
+    }
     # Tokens aus echten Holding-Namen (Allowlist): 'SRI'/'IMI'/'ADR' etc. sind
     # Bestandteil eines Portfolio-Holdingnamens, keine erfundenen Ticker.
     holding_name_words = _portfolio_name_words(holdings)
@@ -823,15 +895,16 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 )
             )
     for isin in _extract_isins(text):
-        if isin not in portfolio_isins:
-            findings.append(
-                _finding(
-                    "major",
-                    f"Ticker/ISIN {isin} nicht im Portfolio",
-                    f"Draft erwaehnt {isin}, Portfolio kennt ihn nicht",
-                    f"{isin} entfernen oder durch Portfolio-Bestand ersetzen",
-                )
+        if isin in portfolio_isins or isin in signal_isins:
+            continue
+        findings.append(
+            _finding(
+                "info",
+                f"ISIN nicht gefunden: {isin}",
+                f"Draft erwaehnt {isin}, Portfolio/Signale kennen ihn nicht",
+                f"{isin} pruefen oder aus Portfolio-Daten ergaenzen",
             )
+        )
 
     # 6. News-Referenz (minor — blockiert Versand nicht)
     news = facts_package.get("news", [])
@@ -984,6 +1057,7 @@ def verify_briefing(
 
     # 2. Ticker/ISIN existence
     mentioned_tickers = _extract_tickers(text)
+    mentioned_isins = _extract_isins(text)
     portfolio_tickers = set()
     portfolio_isins = set()
     for h in portfolio.get("holdings", []):
@@ -996,6 +1070,11 @@ def verify_briefing(
             continue  # Bestandteil eines echten Portfolio-Holdingnamens
         if ticker not in portfolio_tickers and ticker not in portfolio_isins:
             warnings.append(f"Ticker/ISIN {ticker} im Briefing nicht im Portfolio")
+    # ISINs: Portfolio-ISINs ok; unbekannte ISINs sind non-blocking
+    # Datenqualitaets-Hinweise (konsistent zu verify_draft Schritt 5, info).
+    for isin in mentioned_isins:
+        if isin not in portfolio_isins:
+            warnings.append(f"ISIN nicht gefunden: {isin}")
 
     # 3. News references
     mentioned_titles = {entry["title"] for entry in news if entry.get("title")}

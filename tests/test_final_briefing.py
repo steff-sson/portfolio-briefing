@@ -198,6 +198,50 @@ class TestSellReduceSignals:
         section = _section(render_final_briefing(facts), "## Sell-/Reduce-Signale (bestehende Satellites)")
         assert "Keine Sell-/Reduce-Signale." in section
 
+    def test_excluded_signals_not_rendered(self):
+        """Filter-/Ausschlussverhalten: Signal-Objekte mit excluded=True
+        (Core-ETF/SUSE-Legacy) erscheinen NICHT in der Sell-/Reduce-Sektion
+        (nur echte Satellite-SELL/REDUCE-Signale; Rendering folgt den
+        facts-Ausschlussregeln)."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "signal": "SELL", "score": -4, "excluded": True},
+            {"isin": "LU2722255754", "name": "SUSE", "signal": "REDUCE", "score": -1, "excluded": True},
+        ]
+        facts["deterministic_summary"]["watchlist_signals"] = []
+        section = _section(render_final_briefing(facts), "## Sell-/Reduce-Signale (bestehende Satellites)")
+        assert "IE00BK5BQT80" not in section
+        assert "LU2722255754" not in section
+        assert "Vanguard" not in section
+        assert "SUSE" not in section
+        assert "Keine Sell-/Reduce-Signale." in section
+
+    def test_non_blocking_info_minor_never_block_send(self):
+        """Gate-Verhalten: non-blocking info/minor Findings blocken den Versand
+        nicht (final_gate unveraendert; REDUCE-Rendering ist kein Trigger-
+        Thema). Keine Abschwaechung der Blockierlogik."""
+        from scripts import verify
+
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            _signal("NL0010273215", "ASML Holding", "REDUCE", -2)
+        ]
+        # Watchlist nur mit WATCH/NO-SIGNAL-Eintraegen (kein BUY/SELL-Ticker-
+        # Fallstrick, kein NVIDIA-Ticker im gerenderten Text).
+        facts["deterministic_summary"]["watchlist_signals"] = [
+            _signal("US88579Y1010", "3M Co.", "WATCH", 0)
+        ]
+        text = render_final_briefing(facts)
+        # Rendering erzeugt REDUCE-Zeile + Naechster-Schritt-REDUCE-Text.
+        assert "REDUCE" in text
+        # Verify auf dem gerenderten Text: keine critical/major Findings
+        # (deterministischer Renderer ist gate-konform).
+        findings = verify.verify_draft(facts, text)
+        assert not any(f["severity"] in ("critical", "major") for f in findings)
+        # final_gate bleibt fail-closed fuer critical/major, laesst info/minor durch.
+        gate = verify.final_gate(findings, {"findings": [], "overall_verdict": "pass"})
+        assert gate.allow_send is True
+
 
 class TestWatchlistSignals:
     def test_max_three_signals_rendered(self):
@@ -236,6 +280,54 @@ class TestNaechsterSchritt:
         section = _section(render_final_briefing(facts), "## Nächster Schritt")
         assert "Nächste Woche neuer Lauf, keine Aktion erforderlich." in section
 
+    def test_reduce_leads_to_explicit_reduce_action(self):
+        """REDUCE (ohne SELL) -> expliziter REDUCE-Text im Nächster Schritt
+        (REDUCE ist ein eigenes Signal, kein SELL)."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            _signal("NL0010273215", "ASML Holding", "REDUCE", -2)
+        ]
+        facts["deterministic_summary"]["watchlist_signals"] = []
+        section = _section(render_final_briefing(facts), "## Nächster Schritt")
+        assert "REDUCE-Signale prüfen" in section
+        assert "SELL prüfen" not in section
+        assert "keine Aktion erforderlich" not in section
+
+    def test_sell_and_reduce_mixed_prefers_sell(self):
+        """SELL+REDUCE gemischt -> SELL-Priorität (haertestes Signal zuerst),
+        REDUCE wird nicht gesondert adressiert."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            _signal("US0378331005", "Apple Inc.", "SELL", -3),
+            _signal("NL0010273215", "ASML Holding", "REDUCE", -2),
+        ]
+        facts["deterministic_summary"]["watchlist_signals"] = []
+        section = _section(render_final_briefing(facts), "## Nächster Schritt")
+        assert "SELL prüfen" in section
+        assert "REDUCE-Signale prüfen" not in section
+
+    def test_reduce_with_buy_prefers_reduce(self):
+        """REDUCE + BUY (kein SELL) -> REDUCE vor BUY (Satellite-Signal
+        haertet als Watchlist-Kaufkandidat)."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            _signal("NL0010273215", "ASML Holding", "REDUCE", -2)
+        ]
+        section = _section(render_final_briefing(facts), "## Nächster Schritt")
+        assert "REDUCE-Signale prüfen" in section
+        assert "Watchlist-Position prüfen" not in section
+
+    def test_no_action_only_without_sell_reduce_buy(self):
+        """'Keine Aktion erforderlich' nur ohne SELL/REDUCE und ohne BUY —
+        WATCH/NO SIGNAL allein fuehren zur Abschlussphrase."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["satellite_sell_signals"] = []
+        facts["deterministic_summary"]["watchlist_signals"] = [
+            _signal("US88579Y1010", "3M Co.", "WATCH", 0)
+        ]
+        section = _section(render_final_briefing(facts), "## Nächster Schritt")
+        assert "Nächste Woche neuer Lauf, keine Aktion erforderlich." in section
+
 
 class TestKurzlageDatenqualitaet:
     def test_kurzlage_renders_check_lists(self):
@@ -248,6 +340,37 @@ class TestKurzlageDatenqualitaet:
     def test_datenqualitaet_section_ok(self):
         section = _section(render_final_briefing(_valid_facts()), "## Datenqualität")
         assert "Datenqualität: ok." in section
+
+    def test_holding_without_isin_marked_in_datenqualitaet(self):
+        """Holding ohne ISIN -> gerenderte ## Datenqualitaet-Sektion enthaelt
+        '- ISIN nicht gefunden: X' (nie stillschweigend als gueltig behandelt)."""
+        facts = _valid_facts()
+        facts["portfolio"]["holdings"] = [
+            {"name": "X", "isin": ""},
+            {"isin": "US0378331005", "name": "Apple Inc.", "ticker": "AAPL"},
+        ]
+        section = _section(render_final_briefing(facts), "## Datenqualität")
+        assert "- ISIN nicht gefunden: X" in section
+
+    def test_signal_isin_malformed_marked_in_datenqualitaet(self):
+        """Signal-ISIN mit ungueltigem Format -> Hinweis '- ISIN nicht
+        gefunden: INVALID' in der Datenqualitaet (nicht als gueltige Holding
+        im gerenderten Signal-Text behandelt)."""
+        facts = _valid_facts()
+        facts["deterministic_summary"]["watchlist_signals"] = [
+            _signal("INVALID", "Test Corp.", "BUY", 3)
+        ]
+        text = render_final_briefing(facts)
+        section = _section(text, "## Datenqualität")
+        assert "- ISIN nicht gefunden: INVALID" in section
+
+    def test_legit_signal_isin_no_datenqualitaet_hint(self):
+        """Gueltige Watchlist-Signal-ISIN (US5949724083, NVIDIA-Kaufkandidat)
+        -> KEIN 'ISIN nicht gefunden'-Hinweis in der Datenqualitaet."""
+        facts = _valid_facts()
+        section = _section(render_final_briefing(facts), "## Datenqualität")
+        assert "US5949724083" not in section
+        assert "ISIN nicht gefunden" not in section
 
 
 class TestEmptyFactsFallback:

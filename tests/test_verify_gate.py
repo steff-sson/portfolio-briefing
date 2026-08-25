@@ -183,10 +183,15 @@ class TestVerifyDraft:
         findings = verify.verify_draft(VALID_FACTS, draft)
         assert any(f["severity"] == "major" and "MSFT" in f["issue"] for f in findings)
 
-    def test_unknown_isin_is_major(self):
+    def test_unknown_isin_is_info(self):
+        """Unbekannte ISIN -> info-Finding 'ISIN nicht gefunden: ...'
+        (Revision: non-blocking Datenqualitaets-Hinweis, nicht mehr major)."""
         draft = VALID_DRAFT.replace("US0378331005", "US0000000000")
         findings = verify.verify_draft(VALID_FACTS, draft)
-        assert any(f["severity"] == "major" and "US0000000000" in f["issue"] for f in findings)
+        assert any(
+            f["severity"] == "info" and f["issue"] == "ISIN nicht gefunden: US0000000000"
+            for f in findings
+        )
 
     def test_se_and_isin_tokens_are_not_tickers(self):
         """Regression: 'SE' (Rechtsform) und 'ISIN' (Bezeichner) sind keine Ticker —
@@ -310,7 +315,8 @@ class TestVerifyDraft:
 
     def test_holding_name_tokens_require_portfolio_isin(self):
         """Fail-closed: Ein Token ohne zugehoerige Portfolio-ISIN (Holding fehlt
-        im Portfolio) bleibt major — die Allowlist greift nur für echte Bestände."""
+        im Portfolio) bleibt major — die Allowlist greift nur für echte Bestände.
+        (Revision: die unbekannte ISIN selbst ist non-blocking info.)"""
         facts = copy.deepcopy(VALID_FACTS)  # Portfolio kennt nur AAPL/ASML
         draft = VALID_DRAFT.replace(
             "Apple (AAPL, US0378331005) bei 24.8%.",
@@ -318,7 +324,10 @@ class TestVerifyDraft:
         )
         findings = verify.verify_draft(facts, draft)
         assert any(f["severity"] == "major" and "SRI" in f["issue"] for f in findings)
-        assert any(f["severity"] == "major" and "IE00BYX2JD69" in f["issue"] for f in findings)
+        assert any(
+            f["severity"] == "info" and f["issue"] == "ISIN nicht gefunden: IE00BYX2JD69"
+            for f in findings
+        )
 
     def test_no_input_mutation_with_holding_names(self):
         facts = self._holding_only_facts()
@@ -477,6 +486,93 @@ class TestStatusConformity:
         )
         findings = verify.verify_draft(facts, draft)
         assert not any("Konformitaetsphrase" in f["issue"] for f in findings)
+
+
+class TestNaechsterSchrittNoAction:
+    """Phase 5 no-action-Regel: 'Keine Aktion erforderlich' blockt nur bei
+    KONKRETEN Handlungssignalen (nicht-leere position_actions, nicht-excluded
+    SELL/REDUCE auf bestehenden Satellites, BUY auf der Watchlist) — rote/
+    gelbe Checks allein sind KEINE Handlungsempfehlung und blocken nicht."""
+
+    def test_position_actions_with_no_action_is_critical(self):
+        """Konkrete Positionsvorschlaege + no-action-Phrase -> critical."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "reduzieren", "isin": "US0378331005", "name": "Apple Inc."}
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+
+    def test_sell_signal_with_no_action_is_critical(self):
+        """Nicht-excluded SELL-Signal (bestehender Satellit) + no-action -> critical."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            {"isin": "US0378331005", "name": "Apple Inc.", "signal": "SELL", "score": -3, "excluded": False}
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+
+    def test_reduce_signal_with_no_action_is_critical(self):
+        """Nicht-excluded REDUCE-Signal + no-action -> critical."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            {"isin": "US0378331005", "name": "Apple Inc.", "signal": "REDUCE", "score": -2, "excluded": False}
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+
+    def test_buy_watchlist_signal_with_no_action_is_critical(self):
+        """BUY-Signal auf der Watchlist + no-action -> critical."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["watchlist_signals"] = [
+            {"isin": "US5949724083", "name": "NVIDIA Corp.", "signal": "BUY", "score": 3, "excluded": False}
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+
+    def test_excluded_sell_signal_does_not_block_no_action(self):
+        """excluded=True (Core-ETF/SUSE-Legacy) ist kein Handlungssignal —
+        no-action-Phrase bleibt erlaubt."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            {"isin": "LU2722255754", "name": "SUSE", "signal": "SELL", "score": -3, "excluded": True}
+        ]
+        assert verify.verify_draft(facts, VALID_DRAFT) == []
+
+    def test_red_yellow_checks_without_concrete_action_do_not_block(self):
+        """Rote/gelbe Checks OHNE konkrete Handlungssignale blocken die
+        no-action-Phrase nicht (kein neues critical aus der 2a-Regel)."""
+        facts = _facts_with_status_checks(red=["drift"], yellow=["turnover"])
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert not any("Keine Aktion erforderlich" in f["issue"] for f in findings)
+
+    def test_empty_case_with_no_action_stays_green(self):
+        """Echter Leerfall: keine Checks, keine Signale, keine Vorschlaege —
+        no-action-Phrase bleibt gruen (kein Finding)."""
+        facts = _facts_with_status_checks()
+        assert verify.verify_draft(facts, VALID_DRAFT) == []
+
+    def test_no_action_finding_blocks_final_gate(self):
+        """Konkretes Handlungssignal + no-action -> critical blockt final_gate."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "reduzieren", "isin": "US0378331005", "name": "Apple Inc."}
+        ]
+        verification = verify.verify_draft(facts, VALID_DRAFT)
+        gate = verify.final_gate(verification, {"findings": [], "overall_verdict": "pass"})
+        assert gate.allow_send is False
 
 
 class TestStyleGates:
@@ -870,6 +966,71 @@ class TestGlmIdeas:
         )
         findings = verify.verify_draft(_idea_facts(), draft)
         assert any(f["severity"] == "critical" and "Mehr als 2" in f["issue"] for f in findings)
+
+
+class TestSignalIsinAllowlist:
+    """Watchlist-Signal-ISINs (aus deterministic_summary, per Renderer im
+    Draft) sind legitim und duerfen kein 'Ticker/ISIN nicht im Portfolio'-
+    Finding erzeugen. Unbekannte ISINs sind non-blocking info (Datenqualitaets-
+    Hinweis, Revision des Isin-Fixes)."""
+
+    def _facts_with_signals(self, signals: list[dict]) -> dict:
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["watchlist_signals"] = signals
+        return facts
+
+    def _draft_with_isin(self, isin: str) -> str:
+        return VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            f"Neue Kandidatin (US5949724083) bei 24.8%.",
+        ).replace("US5949724083", isin)
+
+    def test_watchlist_signal_isin_no_hint(self):
+        """ISIN aus watchlist_signals -> kein 'ISIN nicht gefunden'-Finding
+        (Allowlist greift, bleibt info-frei)."""
+        facts = self._facts_with_signals(
+            [{"isin": "US5949724083", "name": "NVIDIA Corp.", "signal": "BUY", "score": 3}]
+        )
+        findings = verify.verify_draft(facts, self._draft_with_isin("US5949724083"))
+        assert not any("ISIN nicht gefunden" in f["issue"] for f in findings)
+        assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
+
+    def test_unknown_isin_becomes_info_not_major(self):
+        """Unbekannte ISIN (US0000000000) -> info-Finding mit Issue exakt
+        'ISIN nicht gefunden: US0000000000', NICHT major (Revision:
+        non-blocking Datenqualitaets-Hinweis statt fail-closed-Block)."""
+        facts = self._facts_with_signals(
+            [{"isin": "US5949724083", "name": "NVIDIA Corp.", "signal": "BUY", "score": 3}]
+        )
+        findings = verify.verify_draft(facts, self._draft_with_isin("US0000000000"))
+        assert not any(f["severity"] == "major" for f in findings)
+        assert any(
+            f["severity"] == "info" and f["issue"] == "ISIN nicht gefunden: US0000000000"
+            for f in findings
+        )
+
+    def test_unknown_isin_does_not_block_final_gate(self):
+        """final_gate laesst info-Findings durch (non-blocking)."""
+        gate = verify.final_gate(
+            [_finding("info", "ISIN nicht gefunden: US0000000000")],
+            {"findings": [], "overall_verdict": "pass"},
+        )
+        assert gate.allow_send is True
+
+    def test_satellite_sell_signal_isin_no_hint(self):
+        """ISIN aus satellite_sell_signals -> kein 'ISIN nicht gefunden'-
+        Finding (ISIN im Portfolio oder Allowlist)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["satellite_sell_signals"] = [
+            {"isin": "US0378331005", "name": "Apple Inc.", "signal": "SELL", "score": -3}
+        ]
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Apple Inc. (US0378331005) bei 24.8%.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any("ISIN nicht gefunden" in f["issue"] for f in findings)
+        assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
 
 
 class TestFinalGate:

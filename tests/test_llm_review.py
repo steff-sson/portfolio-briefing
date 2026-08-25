@@ -196,6 +196,35 @@ def test_prompt_style_violations_as_minor_not_delegated():
     assert "minor: Formatierung, Stil-Verstöße" in user_msg
 
 
+def test_prompt_signal_labels_and_closing_phrase_not_findings():
+    """REDUCE-Fix: deterministisch gerenderte Signal-Labels (BUY/SELL/REDUCE)
+    und die Abschlussphrase des ## Nächster Schritt-Blocks sind vertraglicher
+    deterministischer Text — GLM darf sie weder als Handlungsempfehlung noch
+    als Review-Finding beanstanden (kein finding, kein overall_verdict-Grund)."""
+    client = _FakeClient(content=_review_content("info", "pass"))
+    llm_review.review_draft({"meta": {}}, "Draft", client=client)
+    user_msg = client.chat.completions.kwargs["messages"][1]["content"]
+    # Die kurzen Signal-Sektionen des Final-Renderers sind deterministische Quellen
+    assert "Sell-/Reduce-Signale" in user_msg
+    assert "Watchlist-Signale" in user_msg
+    # Deterministisch gerenderte Labels sind ausdruecklich kein Finding
+    assert "BUY/SELL/REDUCE" in user_msg
+    # "…und KEIN\nReview-Finding…" (Zeilenumbruch im Prompt) — normalisiert pruefen
+    assert "kein review-finding" in user_msg.lower().replace("\n", " ")
+    assert "weder als Finding noch als Grund für overall_verdict" in user_msg
+    # Naechster-Schritt-Block mit Abschlussphrase ist deterministisch gerendert
+    assert "Nächster Schritt" in user_msg
+    assert "keine aktion erforderlich" in user_msg.lower()
+    # REDUCE-Abschlussphrase ist explizit als deterministischer Text benannt
+    assert "REDUCE-Signale prüfen" in user_msg
+    # Keine Abschwaechung: semantische Inkonsistenzen der Kurzlage + unerlaubte
+    # Empfehlungen bleiben kritische/major Review-Aufgaben
+    assert "Semantische Inkonsistenzen" in user_msg
+    assert "unerlaubten Empfehlungen" in user_msg
+    assert "critical|major|minor|info" in user_msg
+    assert "pass|revise|block" in user_msg
+
+
 def _facts_package_with_transactions() -> dict:
     """Faktenpaket mit Roh-Transaktionsdaten und Positionswerten, die der
     Review-Kontext NICHT enthalten darf."""
