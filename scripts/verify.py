@@ -8,30 +8,27 @@ from scripts.llm_briefing import LLMError
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Feste Output-Sektionen des kurzen Renderer-Contracts (Phase 5,
-# final_briefing.render_final_briefing): die Abschnittspruefung richtet sich
-# exakt an diesen Vertrag aus (## Kurzlage, ## Datenqualität,
+# Feste Output-Sektionen des 1-Call-Contracts (Plan 1-Call-Briefing,
+# Sektions-Contract): die Abschnittspruefung richtet sich exakt an diesen
+# Vertrag aus (## Kurzlage, ## Datenqualität,
 # ## Sell-/Reduce-Signale (bestehende Satellites), ## Watchlist-Signale,
-# ## Nächster Schritt).
+# ## Empfehlung, ## Nächster Schritt).
 SELL_SIGNALS_SECTION = "## Sell-/Reduce-Signale (bestehende Satellites)"
 WATCHLIST_SIGNALS_SECTION = "## Watchlist-Signale"
 NEXT_STEP_SECTION = "## Nächster Schritt"
 
-# Alle Sektionen des kurzen Output-Formats in fester Reihenfolge.
+# Pflichtsektion '## Empfehlung' (1-Call-Contract, Plan §6a): exakt ein
+# Label BUY|SELL|WATCH, 1:1 aus deterministic_summary.recommendation.
+RECOMMENDATION_SECTION = "## Empfehlung"
+
+# Alle Sektionen des Output-Formats in fester Reihenfolge.
 DRAFT_SECTIONS = [
     "## Kurzlage",
     "## Datenqualität",
     SELL_SIGNALS_SECTION,
     WATCHLIST_SIGNALS_SECTION,
+    RECOMMENDATION_SECTION,
     NEXT_STEP_SECTION,
-]
-
-# Fruehere lange 5-Sektionen-Struktur (Plan Phase 2.1) — seit Phase 5 vom
-# kurzen Renderer-Contract abgeloest; nur noch fuer Kontextpruefungen relevant.
-_LEGACY_SECTIONS = [
-    "## Entscheidungsrelevante Punkte",
-    "## Strategie-Abgleich",
-    "## Relevante News & Veränderungen",
 ]
 
 # Fundamentaldaten-Disclaimer (Phase 5): Muss in jeder Signal-Sektion stehen.
@@ -48,9 +45,8 @@ FUNDAMENTALS_DISCLAIMER = (
     "nicht automatisch verfügbar"
 )
 
-# Abschliessende Gesamt-Empfehlungs-Sektion (Plan §6a): exakt ein Label
-# BUY|SELL|WATCH, 1:1 aus deterministic_summary.recommendation.
-RECOMMENDATION_SECTION = "## Empfehlung"
+# Gesamt-Empfehlungs-Labels (Plan §6a): exakt ein Label BUY|SELL|WATCH,
+# 1:1 aus deterministic_summary.recommendation (Sektion: RECOMMENDATION_SECTION).
 RECOMMENDATION_LABELS = ("BUY", "SELL", "WATCH")
 
 # Sektionen fuer die Optionen-/Status-Kontextpruefung (Plan Phase 2.4/2.6).
@@ -231,24 +227,17 @@ def _verify_traffic_lights(facts_package: dict, text: str, findings: list[dict])
 
 
 def _verify_recommendation(facts_package: dict, text: str, findings: list[dict]) -> None:
-    """Gesamt-Empfehlung (Plan §6a): exakt ein Label in '## Empfehlung', 1:1
-    mit dem deterministischen Label. Imperative Kauf-/Verkaufsanweisungen im
-    Fliesstext bleiben verboten (bestehender Contract).
-
-    Seit Phase 5 (kurzer Renderer-Contract, final_briefing.render_final_briefing)
-    existiert KEINE '## Empfehlung'-Sektion mehr im finalen Text — der kurze
-    Output enthält keine pauschale Gesamt-Empfehlung (test_no_pauschale_
-    seLL_recommendation). Die Sektion wird nur noch als Pflicht geprueft, wenn
-    der Text sie tatsaechlich enthaelt (Legacy-Drafts/Tests mit
-    '## Empfehlung'); ein Text ohne die Sektion ist kein Verstoss.
+    """Gesamt-Empfehlung (Plan §6a + 1-Call-Contract): exakt ein Label in
+    '## Empfehlung', 1:1 mit dem deterministischen Label. Die Sektion ist
+    Pflichtsektion (DRAFT_SECTIONS) — eine fehlende Sektion wird hier
+    zusaetzlich als fehlende Gesamt-Empfehlung gemeldet. Imperative Kauf-/
+    Verkaufsanweisungen im Fliesstext bleiben verboten (bestehender Contract).
 
     Ohne deterministisches Label (leeres Faktenpaket in Test-Mocks) wird die
     Sektion nicht geprueft.
     """
     expected = _recommendation(facts_package).get("label")
     if expected is None:
-        return
-    if RECOMMENDATION_SECTION not in text:
         return
     label = _extract_recommendation_label(text)
     if label is None:
@@ -432,15 +421,15 @@ def _summary_watchlist_scores(summary: dict) -> list[float]:
 
 
 def _verify_signal_sections(facts_package: dict, text: str, findings: list[dict]) -> None:
-    """Phase 5: kurze Signal-Sektionen + Fundamentaldaten-Disclaimer.
+    """1-Call-Contract: kurze Signal-Sektionen + Fundamentaldaten-Disclaimer.
 
-    Prueft, ob alle Sektionen des kurzen Renderer-Contracts (DRAFT_SECTIONS:
+    Prueft, ob alle Sektionen des 1-Call-Contracts (DRAFT_SECTIONS:
     ``## Kurzlage``, ``## Datenqualität``, ``## Sell-/Reduce-Signale (bestehende
-    Satellites)``, ``## Watchlist-Signale``, ``## Nächster Schritt``) im Text
-    vorhanden sind und ob die beiden Signal-Sektionen den Fundamentaldaten-
-    Disclaimer tragen (blockt, wenn fehlt — fail-closed). Naechster-Schritt-
-    Sektion wird nur auf Vorhandensein geprueft (determinierter Text ohne
-    Zahlen).
+    Satellites)``, ``## Watchlist-Signale``, ``## Empfehlung``,
+    ``## Nächster Schritt``) im Text vorhanden sind und ob die beiden
+    Signal-Sektionen den Fundamentaldaten-Disclaimer tragen (blockt, wenn
+    fehlt — fail-closed). Naechster-Schritt-Sektion wird nur auf
+    Vorhandensein geprueft (determinierter Text ohne Zahlen).
     """
     for section in DRAFT_SECTIONS:
         if not re.search(rf"^{re.escape(section)}$", text, re.MULTILINE):
