@@ -442,7 +442,7 @@ class TestStatusConformity:
         """Critical-Konformitaets-Finding blockt ueber das bestehende final_gate."""
         facts = _facts_with_status_checks(red=["drift"])
         verification = verify.verify_draft(facts, _draft_with_phrase())
-        gate = verify.final_gate(verification, {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate(verification)
         assert gate.allow_send is False
 
     def test_no_input_mutation(self):
@@ -571,7 +571,7 @@ class TestNaechsterSchrittNoAction:
             {"action": "reduzieren", "isin": "US0378331005", "name": "Apple Inc."}
         ]
         verification = verify.verify_draft(facts, VALID_DRAFT)
-        gate = verify.final_gate(verification, {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate(verification)
         assert gate.allow_send is False
 
 
@@ -653,12 +653,12 @@ class TestStyleGates:
 
     def test_style_critical_blocks_final_gate(self):
         verification = verify.verify_draft(VALID_FACTS, self._draft("drift verletzt"))
-        gate = verify.final_gate(verification, {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate(verification)
         assert gate.allow_send is False
 
     def test_style_major_blocks_final_gate(self):
         verification = verify.verify_draft(VALID_FACTS, self._draft("nicht Bestandteil des MVP"))
-        gate = verify.final_gate(verification, {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate(verification)
         assert gate.allow_send is False
 
     def test_no_input_mutation(self):
@@ -1012,8 +1012,7 @@ class TestSignalIsinAllowlist:
     def test_unknown_isin_does_not_block_final_gate(self):
         """final_gate laesst info-Findings durch (non-blocking)."""
         gate = verify.final_gate(
-            [_finding("info", "ISIN nicht gefunden: US0000000000")],
-            {"findings": [], "overall_verdict": "pass"},
+            [_finding("info", "ISIN nicht gefunden: US0000000000")]
         )
         assert gate.allow_send is True
 
@@ -1034,58 +1033,55 @@ class TestSignalIsinAllowlist:
 
 
 class TestFinalGate:
-    def test_pass_allows_send(self):
-        gate = verify.final_gate([], {"findings": [], "overall_verdict": "pass"})
+    """1-Call-Contract: final_gate(verification) — verification-only.
+
+    Fail-closed: critical/major aus der Verifikation blockt den Versand;
+    info/minor blocken nie; eine leere (oder nur minor/info enthaltende)
+    Verifikationsliste laesst durch.
+    """
+
+    def test_empty_verification_allows_send(self):
+        gate = verify.final_gate([])
         assert gate.allow_send is True
+        assert gate.reason == "pass"
 
     def test_critical_verify_finding_blocks(self):
-        gate = verify.final_gate([_finding("critical")], {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate([_finding("critical")])
         assert gate.allow_send is False
 
     def test_major_verify_finding_blocks(self):
-        gate = verify.final_gate([_finding("major")], {"findings": [], "overall_verdict": "pass"})
+        gate = verify.final_gate([_finding("major")])
         assert gate.allow_send is False
 
-    def test_review_critical_finding_blocks(self):
-        review = {"findings": [_finding("critical")], "overall_verdict": "pass"}
-        assert verify.final_gate([], review).allow_send is False
-
-    def test_review_major_finding_blocks(self):
-        review = {"findings": [_finding("major")], "overall_verdict": "pass"}
-        assert verify.final_gate([], review).allow_send is False
-
-    def test_revise_verdict_blocks(self):
-        review = {"findings": [], "overall_verdict": "revise"}
-        gate = verify.final_gate([], review)
-        assert gate.allow_send is False
-        assert "revise" in gate.reason
-
-    def test_block_verdict_blocks(self):
-        review = {"findings": [], "overall_verdict": "block"}
-        gate = verify.final_gate([], review)
-        assert gate.allow_send is False
-        assert "block" in gate.reason
-
-    def test_info_and_minor_do_not_block(self):
+    def test_minor_and_info_do_not_block(self):
         verification = [_finding("minor"), _finding("info")]
-        review = {"findings": [_finding("minor")], "overall_verdict": "pass"}
-        assert verify.final_gate(verification, review).allow_send is True
+        gate = verify.final_gate(verification)
+        assert gate.allow_send is True
 
-    def test_missing_verdict_blocks(self):
-        review = {"findings": []}
-        gate = verify.final_gate([], review)
+    def test_minor_only_does_not_block(self):
+        gate = verify.final_gate([_finding("minor")])
+        assert gate.allow_send is True
+
+    def test_info_only_does_not_block(self):
+        gate = verify.final_gate([_finding("info")])
+        assert gate.allow_send is True
+
+    def test_mixed_with_blocking_severity_blocks(self):
+        """Auch mit minor/info in der Liste blockt critical/major (fail-closed)."""
+        verification = [_finding("minor"), _finding("critical", "Halluzination")]
+        gate = verify.final_gate(verification)
         assert gate.allow_send is False
-        assert "overall_verdict" in gate.reason
+        assert "Halluzination" in gate.reason
 
-    def test_invalid_verdict_blocks(self):
-        review = {"findings": [], "overall_verdict": "approve"}
-        assert verify.final_gate([], review).allow_send is False
+    def test_multiple_critical_reasons_in_gate_reason(self):
+        """Gate-Reason nennt die ersten blockierenden Issues."""
+        verification = [_finding("critical", "A"), _finding("major", "B")]
+        gate = verify.final_gate(verification)
+        assert gate.allow_send is False
+        assert "A" in gate.reason and "B" in gate.reason
 
     def test_no_input_mutation(self):
-        review = {"findings": [_finding("critical")], "overall_verdict": "block"}
-        review_before = copy.deepcopy(review)
-        verification = [_finding("critical")]
+        verification = [_finding("critical"), _finding("minor")]
         verification_before = copy.deepcopy(verification)
-        verify.final_gate(verification, review)
-        assert review == review_before
+        verify.final_gate(verification)
         assert verification == verification_before

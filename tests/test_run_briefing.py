@@ -4,6 +4,10 @@ Nutzt ausschliesslich Mock-Daten und Fake-Objekte — keine API-/Telegram-Aufruf
 Datenbeschaffung: Dry-Run via sc_bridge.load_mock(); produktiver Lauf via
 snapshot.load_previous -> sc_bridge.refresh_from_sc -> snapshot.capture_staged
 -> diff.diff_snapshots (kein update_config).
+
+1-Call-Architektur: Der produktive Pfad macht genau EINEN LLM-Call
+(llm_briefing.generate_draft, gemockt) -> verify_draft -> final_gate
+(verification-only) -> Versand. Keine Humanize-/Review-/Revise-Stufe.
 """
 from __future__ import annotations
 
@@ -13,9 +17,7 @@ from scripts import (
     analyze,
     diff,
     filter_news,
-    final_briefing,
-    llm_humanize,
-    llm_review,
+    llm_briefing,
     run_briefing,
     sc_bridge,
     send_telegram,
@@ -25,8 +27,9 @@ from scripts import (
 EMPTY_STRATEGY = {"strategy": {}}
 EMPTY_ANALYSIS = {"checks": {}}
 
-# Valid Draft: alle 5 Pflichtsektionen des kurzen Output-Contracts, keine
-# Zahlen/Ticker (EMPTY_ANALYSIS -> Summary 0).
+# Valid Draft: alle 6 Pflichtsektionen des 1-Call-Contracts, keine
+# Zahlen/Ticker (EMPTY_ANALYSIS -> Summary 0 -> leere Allowlist, keine
+# deterministische Empfehlung).
 VALID_DRAFT = (
     "## Kurzlage\n"
     "OK\n\n"
@@ -41,9 +44,10 @@ VALID_DRAFT = (
     "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
     "nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
     "## Nächster Schritt\n"
-    "Nächste Woche neuer Lauf, keine Aktion erforderlich."
+    "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+    "## Empfehlung\n"
+    "WATCH — kein Handlungsbedarf."
 )
-PASS_REVIEW = {"findings": [], "overall_verdict": "pass"}
 
 
 def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions) -> dict:
@@ -88,19 +92,40 @@ def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions) -> dict:
     monkeypatch.setattr(analyze, "load_strategy", lambda: EMPTY_STRATEGY)
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: [])
+    monkeypatch.setattr(filter_news, "fetch_news_for_unlisted_ideas", lambda p: [])
     return calls
 
 
+def _mock_draft(monkeypatch, draft: str = VALID_DRAFT) -> dict:
+    """Mockt generate_draft: liefert einen gueltigen 6-Sektionen-Draft, tracked Calls."""
+    calls = {"draft_calls": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["draft_calls"] += 1
+        return draft
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    return calls
+
+
+def _fake_send(sent):
+    def _send(text, mode):
+        sent.append((text, mode))
+        return True
+
+    return _send
+
+
 def test_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Bug-Regression: Humanizer-LLMError -> Exit != 0, kein Versand, keine Vault-Datei, nur Alert."""
+    """Bug-Regression: generate_draft-LLMError -> Exit != 0, kein Versand, keine Vault-Datei, nur Alert."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
 
-    def _raise_llm_error(*args, **kwargs):
-        raise llm_humanize.LLMError("API down")
+    def _raise_llm_error(facts_package, mode="monday", client=None):
+        raise llm_briefing.LLMError("API down")
 
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", _raise_llm_error)
+    monkeypatch.setattr(llm_briefing, "generate_draft", _raise_llm_error)
 
     rc = run_briefing.run("monday", dry_run=False)
 
@@ -141,16 +166,9 @@ def test_dry_run_does_not_block_real_run(monkeypatch, tmp_path, portfolio, trans
     assert archived and all(name.endswith("-monday-dryrun.md") for name in archived)
     assert run_briefing._already_run_today("monday") is False
 
-    generated = []
-
-    def _fake_humanize(*args, **kwargs):
-        generated.append(1)
-        return VALID_DRAFT
-
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", _fake_humanize)
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
+    draft_calls = _mock_draft(monkeypatch)
     assert run_briefing.run("monday", dry_run=False) == 0
-    assert generated  # Humanizer wurde aufgerufen -> kein Skip durch Dry-Run-Datei
+    assert draft_calls["draft_calls"] == 1  # generate_draft wurde aufgerufen -> kein Skip
 
 
 def test_send_failure_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
@@ -160,10 +178,9 @@ def test_send_failure_is_fail_closed(monkeypatch, tmp_path, portfolio, transacti
     Versand keine weitere Datei an (Archivierung passiert intern in send_briefing).
     """
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or False)
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": VALID_DRAFT)
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
 
@@ -224,8 +241,7 @@ def test_dry_run_skips_news_fetch_non_dry_run_fetches(monkeypatch, tmp_path, por
     assert news_calls == []  # fetch_and_filter_news im Dry-Run nie aufgerufen
 
     # Non-Dry-Run: normaler News-Fetch laeuft weiterhin
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": VALID_DRAFT)
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
+    _mock_draft(monkeypatch)
     assert run_briefing.run("monday", dry_run=False) == 0
     assert news_calls == [1]  # genau ein News-Fetch im produktiven Lauf
 
@@ -323,111 +339,142 @@ def test_non_dry_run_error_still_sends_alert(monkeypatch, tmp_path, portfolio, t
     assert "live analyze bug" in sent[0][0]
 
 
-# --- P5: Humanizer-Pfad (deterministische Quelle -> LLM-Humanizer -> Verify-Absatz) ---
+# --- 1-Call-Architektur: genau ein generate_draft-Call, dann verify, dann gate, dann Versand ---
 
 
-def _real_humanized() -> str:
-    """Deterministisch gerenderter Text, minimal gehumanisiert (Contract-konform)."""
-    return (
-        "## Kurzlage\n"
-        "Alles im grünen Bereich.\n\n"
-        "## Datenqualität\n"
-        "—\n\n"
-        "## Sell-/Reduce-Signale (bestehende Satellites)\n"
-        "Keine Verkaufs- oder Reduktionssignale für bestehende Satellites.\n\n"
-        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
-        "nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
-        "## Watchlist-Signale\n"
-        "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n\n"
-        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
-        "nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
-        "## Nächster Schritt\n"
-        "Nächste Woche neuer Lauf, keine Aktion erforderlich."
+def test_dry_run_skips_generate_draft(monkeypatch, tmp_path, portfolio, transactions):
+    """Dry-Run: _dry_run_placeholder statt generate_draft — kein LLM-Call."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    draft_calls = []
+    monkeypatch.setattr(
+        llm_briefing,
+        "generate_draft",
+        lambda facts_package, mode="monday", client=None: (draft_calls.append(1), VALID_DRAFT)[1],
     )
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: True)
+
+    rc = run_briefing.run("monday", dry_run=True)
+
+    assert rc == 0
+    assert draft_calls == []  # kein LLM-Call im Dry-Run
 
 
-def test_run_deterministic_before_humanize(monkeypatch, tmp_path, portfolio, transactions):
-    """Produktiver Lauf: render_final_briefing wird VOR humanize_briefing
-    aufgerufen (deterministische Quelle zuerst); verify/review sehen den
-    gehumanisierten Text. Dry-Run ueberspringt den Humanizer (kein LLM-Call)."""
+def test_single_draft_call_then_verify_gate_send(monkeypatch, tmp_path, portfolio, transactions):
+    """Produktiver Lauf: genau EIN generate_draft-Call, dann verify_draft,
+    final_gate und Versand — in dieser Reihenfolge."""
     order = []
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
-    real_render = final_briefing.render_final_briefing
-    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
 
-    def _render(facts_package, mode="monday"):
-        order.append("render")
-        return real_render(facts_package, mode=mode)
+    def _generate(facts_package, mode="monday", client=None):
+        order.append("draft")
+        return VALID_DRAFT
 
-    def _humanize(briefing_text, mode="monday"):
-        order.append("humanize")
-        return _real_humanized()
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
 
-    monkeypatch.setattr(final_briefing, "render_final_briefing", _render)
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", _humanize)
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
+    real_verify = run_briefing.verify.verify_draft
+
+    def _verify(facts_package, draft):
+        order.append("verify")
+        return real_verify(facts_package, draft)
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _verify)
+
+    real_gate = run_briefing.verify.final_gate
+
+    def _gate(verification):
+        order.append("gate")
+        return real_gate(verification)
+
+    monkeypatch.setattr(run_briefing.verify, "final_gate", _gate)
 
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 0
-    assert order == ["render", "humanize"]  # Render VOR Humanizer
+    assert order == ["draft", "verify", "gate"]  # genau ein LLM-Call, dann Gate, dann Versand
     assert len(sent) == 1 and sent[0][1] == "monday"
-    # Versendeter Text = gehumanisierte Fassung + Verify-Absatz (Humanizer-Text,
-    # nicht der deterministische Render-Output).
-    assert "Alles im grünen Bereich." in sent[0][0]
-    assert "## Verifizierung" in sent[0][0]
-
-    # Dry-Run: kein Humanizer-Call (kein LLM), kein Render (Platzhalter-Pfad).
-    order.clear()
-    assert run_briefing.run("monday", dry_run=True) == 0
-    assert order == []
 
 
-def test_run_humanize_failure_fail_closed_no_fallback(monkeypatch, tmp_path, portfolio, transactions):
-    """Humanizer-Fehler -> fail-closed: rc 1, KEIN Versand (kein Fallback auf
-    die deterministische Rohfassung), keine Vault-Datei, nur Alert."""
+def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """final_gate blockt (critical/major aus verify) -> Alert, Exit 1, kein Versand."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
     sent = []
-    render_calls = {"n": 0}
-    real_render = final_briefing.render_final_briefing
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
-    monkeypatch.setattr(final_briefing, "render_final_briefing", lambda facts_package, mode="monday": (render_calls.__setitem__("n", render_calls["n"] + 1), real_render(facts_package, mode=mode))[1])
 
-    def _humanize_fail(briefing_text, mode="monday"):
-        raise llm_humanize.LLMError("Humanize-API down")
+    def _blocking_verify(facts_package, draft):
+        return [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}]
 
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", _humanize_fail)
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _blocking_verify)
 
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 1
-    assert render_calls["n"] == 1  # Render lief (Quelle), Humanizer schlug fehl
-    assert list(tmp_path.iterdir()) == []  # keine Vault-Datei
-    # Nur der Alert, kein Briefing-Versand: kein Fallback auf die
-    # deterministische Rohfassung (User-Vorgabe, kein Rohtext-Fallback).
+    assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1 and sent[0][1] == "alert"
-    assert "humanize failed" in sent[0][0]
-    assert "kein Fallback" in sent[0][0]
+    assert "final_gate" in sent[0][0]
 
 
-def test_run_verify_paragraph_appended_last_not_humanized(monkeypatch, tmp_path, portfolio, transactions):
-    """Nach final_gate PASS: Verify-Absatz (render_verify_paragraph) ist der
-    LETZTE Absatz des versendeten Texts und laeuft NICHT durch den Humanizer."""
-    order = []
+def test_gate_alert_has_no_false_traceback(monkeypatch, tmp_path, portfolio, transactions):
+    """Gate-Block-Alert darf keinen nutzlosen Traceback (NoneType) enthalten."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": (order.append("humanize"), _real_humanized())[1])
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
-    monkeypatch.setattr(final_briefing, "render_verify_paragraph", lambda verification, review, gate_reason="": (order.append("verify_paragraph"), "## Verifizierung\n\n- Verify: PASS — 0 findings.\n- Review: PASS — 0 findings (overall_verdict: pass).\n- final_gate: pass.")[1])
+
+    def _blocking_verify(facts_package, draft):
+        return [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}]
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _blocking_verify)
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 0
-    assert order == ["humanize", "verify_paragraph"]  # Verify-Absatz NACH Humanizer
-    sent_text = sent[0][0]
-    # Verify-Absatz steht am Ende (nach "## Nächster Schritt").
-    assert sent_text.rstrip().endswith("- final_gate: pass.")
-    assert "## Verifizierung" in sent_text
-    assert sent_text.index("## Verifizierung") > sent_text.index("## Nächster Schritt")
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "final_gate" in sent[0][0]
+    assert "NoneType" not in sent[0][0]  # kein format_exc()-Müll ausserhalb Exception-Kontext
+    assert "Traceback" not in sent[0][0]
+
+
+def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Unerwarteter (nicht-LLM) Verify-Fehler -> fail-closed: Alert, kein Versand, keine Vault-Datei."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    def _broken_verify(facts_package, draft):
+        raise RuntimeError("interner Verify-Bug")
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _broken_verify)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
+    assert len(sent) == 1  # nur Alert, kein Briefing-Versand
+    assert sent[0][1] == "alert"
+    assert "verify failed" in sent[0][0]
+    assert "interner Verify-Bug" in sent[0][0]
+
+
+def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Separater LLMError-Pfad der Verifikation bleibt erhalten (fail-closed, Alert)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    def _llm_error_verify(facts_package, draft):
+        raise llm_briefing.LLMError("Draft sieht nach LLM-Fehlertext aus (Marker 'fehlgeschlagen').")
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _llm_error_verify)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "verify failed (fail-closed)" in sent[0][0]

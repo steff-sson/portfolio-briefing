@@ -640,7 +640,7 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
     """Produktiver Lauf: gezielt recherchierte Neukauf-News werden zu den
     Bestands-News hinzugefuegt (keine Duplikate)."""
     from scripts import analyze as analyze_mod
-    from scripts import facts, llm_humanize, llm_review, run_briefing, send_telegram
+    from scripts import facts, llm_briefing, run_briefing, send_telegram
 
     monkeypatch.setattr(run_briefing, "_setup_logging", lambda: None)
     monkeypatch.setattr(run_briefing, "VAULT_DIR", tmp_path)
@@ -681,9 +681,9 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", _fake_fetch)
     monkeypatch.setattr(filter_news, "fetch_news_for_unlisted_ideas", _fake_idea_news)
 
-    # Der Humanizer (einzige LLM-Stufe) sieht den deterministisch gerenderten
-    # Text; die News-Liste des Faktenpakets (Bestand + Ideen-Recherche,
-    # dedupliziert) erreicht die Pipeline über build_facts_package. Der kurze
+    # Der einzige LLM-Call (generate_draft) liefert einen gueltigen Draft; die
+    # News-Liste des Faktenpakets (Bestand + Ideen-Recherche, dedupliziert)
+    # erreicht die Pipeline über build_facts_package. Der kurze
     # Renderer-Contract (Phase 5) rendert die News-Titel nicht mehr in den Text
     # — der Test belegt daher den Merge in die News-Liste des Faktenpakets.
     seen_news: list[dict] = []
@@ -695,8 +695,24 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
         return pkg
 
     monkeypatch.setattr(facts, "build_facts_package", _build_facts)
-    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
-    monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: {"findings": [], "overall_verdict": "pass"})
+    monkeypatch.setattr(
+        llm_briefing,
+        "generate_draft",
+        lambda facts_package, mode="monday", client=None: (
+            "## Kurzlage\nOK\n\n"
+            "## Datenqualität\n—\n\n"
+            "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\n"
+            "WATCH — kein Handlungsbedarf."
+        ),
+    )
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
 
