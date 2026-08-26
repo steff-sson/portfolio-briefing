@@ -379,6 +379,19 @@ def test_briefing_prompt_enforces_verbatim_numbers_and_labels():
     assert "Fundamentaldaten" in content
 
 
+def test_briefing_prompt_contains_disclaimer_wording_and_news_instruction():
+    """briefing.txt: exakter verify-Disclaimer-Wortlaut und News-Referenz-
+    Anweisung sind im Prompt enthalten (hart formuliert, kein weiches 'kann')."""
+    from scripts import verify
+
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    assert verify.FUNDAMENTALS_DISCLAIMER in content
+    assert "## Sell-/Reduce-Signale (bestehende Satellites)" in content
+    assert "## Watchlist-Signale" in content
+    assert "referenziere mindestens 1-2" in content
+    assert "news" in content.lower()
+
+
 def test_only_single_prompt_file_and_setup_exists():
     """1-Call-Architektur: nur briefing.txt + q4_tax_context.txt + setup_system.txt —
     keine geloeschten Mode-/Humanize-/Review-/Revise-Prompts."""
