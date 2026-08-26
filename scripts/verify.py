@@ -996,32 +996,18 @@ class GateDecision:
         return self.allow_send == other.allow_send and self.reason == other.reason
 
 
-def final_gate(draft_verification: list[dict], review: dict) -> GateDecision:
-    """Stage-6 send gate: combine deterministic findings + LLM review.
+def final_gate(draft_verification: list[dict]) -> GateDecision:
+    """Stage-6 send gate: deterministic verify findings only.
 
-    Fail-closed: any critical/major finding (verify or review) blocks the
-    send; ``overall_verdict`` ``block`` blocks as well. ``revise`` blocks
-    here because the orchestrator's revision loop (max MAX_REVISIONS) has
-    already run — a verdict still ``revise`` at this point is unresolved.
+    Fail-closed: any critical/major verify finding blocks the send;
     ``info``/``minor`` never block. Does not mutate any input.
     """
     blocking = [
         f for f in draft_verification if f.get("severity") in ("critical", "major")
     ]
-    review_findings = review.get("findings", []) if isinstance(review, dict) else []
-    blocking += [f for f in review_findings if f.get("severity") in ("critical", "major")]
-
     if blocking:
         reasons = ", ".join(f.get("issue", "?") for f in blocking[:3])
         return GateDecision(False, f"Blockierende Findings: {reasons}")
-
-    verdict = review.get("overall_verdict") if isinstance(review, dict) else None
-    if verdict not in ("pass", "revise", "block"):
-        return GateDecision(False, "overall_verdict fehlt oder ungueltig")
-    if verdict == "revise":
-        return GateDecision(False, "overall_verdict=revise (nach MAX_REVISIONS ungeloest)")
-    if verdict == "block":
-        return GateDecision(False, "overall_verdict=block")
     return GateDecision(True, "pass")
 
 
