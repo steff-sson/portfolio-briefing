@@ -28,33 +28,21 @@ def _load_env() -> None:
 
 
 def _load_prompt(mode: str, context: dict) -> str:
-    """Load the mode prompt template and fill it from a context dict.
+    """Load the briefing prompt template and fill it from a context dict.
 
-    ``context`` must provide the template placeholders ``portfolio``,
-    ``analysis``, ``news``, ``strategy``, ``triggers``, ``strategy_diff``,
-    ``data_quality`` and ``changes`` (each as raw dict/list — the values
-    are JSON-serialized here).
+    Mode-independent: the single ``briefing.txt`` template replaces the old
+    per-mode prompts (monday/friday/monthly/humanize). ``context`` must
+    provide the placeholder ``facts`` (raw dict — the values are
+    JSON-serialized here).
     """
-    prompt_file = PROMPTS_DIR / f"{mode}.txt"
-    if not prompt_file.exists():
-        prompt_file = PROMPTS_DIR / "monday.txt"
+    prompt_file = PROMPTS_DIR / "briefing.txt"
     template = prompt_file.read_text(encoding="utf-8")
     if 10 <= datetime.now().month <= 12:
         tax_file = PROMPTS_DIR / "q4_tax_context.txt"
         if tax_file.exists():
             template = template + "\n\n" + tax_file.read_text(encoding="utf-8")
     return template.format(
-        portfolio=json.dumps(context.get("portfolio", {}), ensure_ascii=False, indent=2),
-        analysis=json.dumps(context.get("analysis", {}), ensure_ascii=False, indent=2),
-        news=json.dumps(context.get("news", []), ensure_ascii=False, indent=2),
-        strategy=json.dumps(context.get("strategy", {}), ensure_ascii=False, indent=2),
-        triggers=json.dumps(context.get("triggers", {}), ensure_ascii=False, indent=2),
-        strategy_diff=json.dumps(context.get("strategy_diff") or {}, ensure_ascii=False, indent=2),
-        data_quality=json.dumps(context.get("data_quality") or {}, ensure_ascii=False, indent=2),
-        changes=json.dumps(context.get("changes") or {}, ensure_ascii=False, indent=2),
-        traffic_lights=json.dumps(context.get("traffic_lights") or {}, ensure_ascii=False, indent=2),
-        recommendation=json.dumps(context.get("recommendation") or {}, ensure_ascii=False, indent=2),
-        position_actions=json.dumps(context.get("position_actions") or [], ensure_ascii=False, indent=2),
+        facts=json.dumps(context.get("facts") or {}, ensure_ascii=False, indent=2),
     )
 
 
@@ -172,12 +160,12 @@ def generate_briefing(
     """Single-stage LLM filter+composition (legacy path).
 
     Fail-closed: raises LLMError instead of returning error text as briefing.
-    Deprecated: the pipeline uses the two-stage ``generate_draft``; this
-    legacy entry point still passes the full raw context.
+    Deprecated: the pipeline uses ``generate_draft``; this legacy entry
+    point still passes the full raw context via ``briefing.txt``.
     """
     prompt = _load_prompt(
         mode,
-        {"portfolio": portfolio, "analysis": analysis, "news": news, "strategy": strategy},
+        {"facts": {"portfolio": portfolio, "analysis": analysis, "news": news, "strategy": strategy}},
     )
     try:
         client = _get_client()
@@ -221,10 +209,11 @@ def generate_draft(facts_package: dict, mode: str = "monday", client=None) -> st
     — never returns error text as draft.
     """
     context = _draft_context(facts_package)
-    prompt = _load_prompt(mode, context)
-    prompt += "\n\nFAKTENPAKET (deterministic_summary — Zahlen NUR hieraus referenzieren, nie erfinden):\n"
-    prompt += json.dumps(facts_package.get("deterministic_summary", {}), ensure_ascii=False, indent=2)
-    prompt += "\n\n" + _format_allowed_pct_list(facts_package)
+    # 1-Call-Architektur (Plan-1-call-briefing): der einzige Prompt briefing.txt
+    # erhaelt das volle deterministische Faktenpaket ($facts) — Zahlen/Labels/
+    # Signale stammen ausschliesslich daraus. Die reduzierte Sicht (nur
+    # deterministic_summary + allowlist) entfaellt zugunsten des Pakets.
+    prompt = _load_prompt(mode, {"facts": facts_package})
 
     try:
         client = client or _get_client()
@@ -254,15 +243,3 @@ def generate_draft(facts_package: dict, mode: str = "monday", client=None) -> st
                 time.sleep(2 ** attempt)
             continue
     raise LLMError(f"Draft-Generierung fehlgeschlagen: {last_error}") from last_error
-
-
-if __name__ == "__main__":
-    from scripts import analyze, sc_bridge
-
-    portfolio = sc_bridge.get_portfolio()
-    transactions = sc_bridge.get_transactions()
-    strategy = analyze.load_strategy()
-    analysis = analyze.analyze_portfolio(portfolio, transactions, strategy)
-    news = []  # standalone test
-    briefing = generate_briefing(portfolio, analysis, news, strategy)
-    print(briefing)
