@@ -489,6 +489,10 @@ def _extract_tickers(text: str) -> set[str]:
         # Finanz-/Rechtsform-Token — keine Ticker (geschlossene Blocklist).
         "SE", "ISIN", "WKN", "AG", "KG", "SA", "NV", "BV",
         "PLC", "LTD", "INC", "CORP", "CO",
+        # Häufige deutsche Abkürzungen/Wörter, die als Großbuchstaben-Token
+        # vorkommen können — keine Ticker (Live-Fix: "KI-Thema" löste sonst
+        # "Ticker/ISIN KI nicht im Portfolio" aus).
+        "KI", "USA", "EU", "ESG", "RSS", "API",
     }
     candidates = set(re.findall(r"\b[A-Z]{2,5}(?:[-\.]?[A-Z]+)?\b", text))
     return candidates - common

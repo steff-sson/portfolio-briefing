@@ -202,6 +202,17 @@ class TestVerifyDraft:
         )
         assert verify.verify_draft(VALID_FACTS, draft) == []
 
+    def test_german_abbreviations_are_not_tickers(self):
+        """Regression: 'KI' (Künstliche Intelligenz) im Wort 'KI-Thema' ist
+        kein Ticker — 'Ticker/ISIN KI nicht im Portfolio' darf nicht auslösen
+        (Live-Fix). Alle deutschen Abkürzungen der Blocklist bleiben tickerfrei."""
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Apple (AAPL, US0378331005) bei 24.8%. Das KI-Thema bleibt spannend.",
+        )
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
+
     @pytest.mark.parametrize(
         "token",
         ["SE", "ISIN", "WKN", "AG", "KG", "SA", "NV", "BV", "PLC", "LTD", "INC", "CORP", "CO"],

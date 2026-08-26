@@ -19,7 +19,7 @@ SEKTIONS-CONTRACT (zwingend, exakt diese Reihenfolge und diese Überschriften):
 
 HARTE REGELN:
 1. Zahlen, ISIN, Ticker und Labels (BUY/SELL/WATCH/REDUCE/AVOID/NO SIGNAL) ausschließlich aus dem Paket übernehmen — wortgleich, nie erfinden.
-2. KEINE neuen Fakten, KEINE neuen Zahlen, KEINE Prozentwerte außerhalb des Pakets.
+2. KEINE neuen Fakten, KEINE neuen Zahlen, KEINE Prozentwerte außerhalb des Pakets. ZAHLENREGEL (blockierend): Prozentwerte und Zahlen NUR aus deterministic_summary übernehmen — ausschließlich die Werte aus der ZULÄSSIGE-ZAHLEN-Liste (die einzige erlaubte Zahlenquelle). Zahlen aus News-Titeln/-Beschreibungen sind VERBOTEN, auch wenn sie im Faktenpaket vorkommen — sie bestehen die Verifikation nicht. Willst du eine Entwicklung beschreiben, die nur eine News-Zahl hat, formuliere sie qualitativ (z.B. "deutlich gestiegen") OHNE die Zahl zu nennen.
 3. KEINE Imperative ohne Signal-Basis (kein "kaufen Sie"/"verkaufen Sie" ohne entsprechendes Signal).
 4. In ## Empfehlung ist die erste Zeile das Label (BUY/SELL/WATCH) — 1:1 aus deterministic_summary.recommendation übernehmen, nicht selbst wählen.
 5. FUNDAMENTALDATEN-DISCLAIMER (blockierend, PFLICHT): Sind im Faktenpaket `satellite_sell_signals` ODER `watchlist_signals` nicht leer, MUSS unter JEDER der beiden Sektionen `## Sell-/Reduce-Signale (bestehende Satellites)` und `## Watchlist-Signale` der Fundamentaldaten-Disclaimer als letzter Absatz stehen — wortgleich und als eigenständiger Absatz. Exakter Wortlaut (1:1 übernehmen):
