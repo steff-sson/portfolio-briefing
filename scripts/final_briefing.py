@@ -515,6 +515,59 @@ def _section_naechster_schritt(summary: dict) -> str:
     return "Nächste Woche neuer Lauf, keine Aktion erforderlich."
 
 
+# --- Verify-Status-Absatz (Plan P4) ------------------------------------------
+# Deterministischer, rein darstellender Absatz: wird NACH final_gate PASS an
+# das gehumanisierte Briefing angehaengt (letzter Absatz, vor render_markdown).
+# Enthaelt keine Fakten/Zahlen/ISIN/Labels — nur Counts + Verdict + Gate-Reason.
+# Maschinen-/testbar: gleicher Input => exakt gleicher Output, kein IO.
+
+
+def render_verify_paragraph(
+    verification: list[dict] | None,
+    review: dict | None = None,
+    gate_reason: str | None = "",
+) -> str:
+    """Deterministischer Verify-Status-Absatz (darstellend, kein Gate).
+
+    Zaehlt ``critical``/``major``/``minor``/``info`` aus ``verification`` und
+    ``review.findings`` und nennt ``review.overall_verdict`` (falls vorhanden)
+    sowie ``gate_reason``. Keine Fakten, keine Diagnose-Details, kein IO.
+    """
+    findings = list(verification or []) + list((review or {}).get("findings") or [])
+
+    def _count(items: list, severity: str) -> int:
+        return sum(1 for f in items if isinstance(f, dict) and f.get("severity") == severity)
+
+    counts = {
+        "critical": _count(findings, "critical"),
+        "major": _count(findings, "major"),
+        "minor": _count(findings, "minor"),
+        "info": _count(findings, "info"),
+    }
+
+    if findings:
+        details = ", ".join(f"{v} {k}" for k, v in counts.items())
+        verify_line = f"Verify: PASS — {details}."
+        review_line = "Review: PASS."
+    else:
+        verify_line = "Verify: PASS — 0 findings."
+        review_line = "Review: PASS — 0 findings."
+
+    review_findings = list((review or {}).get("findings") or [])
+    if review_findings:
+        review_details = ", ".join(
+            f"{_count(review_findings, k)} {k}" for k in ("critical", "major", "minor", "info")
+        )
+        review_line = f"Review: PASS — {review_details}."
+
+    verdict = (review or {}).get("overall_verdict")
+    if verdict is not None:
+        review_line = review_line.removesuffix(".") + f" (overall_verdict: {verdict})."
+
+    gate_line = f"final_gate: {(gate_reason or '').strip() or 'pass'}."
+    return f"## Verifizierung\n\n- {verify_line}\n- {review_line}\n- {gate_line}"
+
+
 def render_final_briefing(facts_package: dict, mode: str = "monday") -> str:
     """Deterministisches finales Briefing in den kurzen Sektionen (Phase 5):
 

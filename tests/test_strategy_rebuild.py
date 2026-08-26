@@ -640,7 +640,7 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
     """Produktiver Lauf: gezielt recherchierte Neukauf-News werden zu den
     Bestands-News hinzugefuegt (keine Duplikate)."""
     from scripts import analyze as analyze_mod
-    from scripts import llm_briefing, llm_review, run_briefing, send_telegram
+    from scripts import facts, llm_humanize, llm_review, run_briefing, send_telegram
 
     monkeypatch.setattr(run_briefing, "_setup_logging", lambda: None)
     monkeypatch.setattr(run_briefing, "VAULT_DIR", tmp_path)
@@ -681,18 +681,21 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", _fake_fetch)
     monkeypatch.setattr(filter_news, "fetch_news_for_unlisted_ideas", _fake_idea_news)
 
-    # Draft-Nachrichten-Referenz prueft nur Titel, die im Faktenpaket sind.
-    seen_titles = set()
+    # Der Humanizer (einzige LLM-Stufe) sieht den deterministisch gerenderten
+    # Text; die News-Liste des Faktenpakets (Bestand + Ideen-Recherche,
+    # dedupliziert) erreicht die Pipeline über build_facts_package. Der kurze
+    # Renderer-Contract (Phase 5) rendert die News-Titel nicht mehr in den Text
+    # — der Test belegt daher den Merge in die News-Liste des Faktenpakets.
+    seen_news: list[dict] = []
+    real_build = facts.build_facts_package
 
-    def _draft(facts_package, mode="monday"):
-        seen_titles.update(n.get("title", "") for n in facts_package.get("news", []))
-        return (
-            "## Kurzlage\nOK\n\n## Datenqualität\n—\n\n## Entscheidungsrelevante Punkte\n—\n\n"
-            "## Strategie-Abgleich\n—\n\n## Relevante News & Veränderungen\nApple News.\n\n"
-            "## Empfehlung\nWATCH — kein Handlungsbedarf."
-        )
+    def _build_facts(*args, **kwargs):
+        pkg = real_build(*args, **kwargs)
+        seen_news.extend(pkg.get("news", []))
+        return pkg
 
-    monkeypatch.setattr(llm_briefing, "generate_draft", _draft)
+    monkeypatch.setattr(facts, "build_facts_package", _build_facts)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: {"findings": [], "overall_verdict": "pass"})
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
@@ -701,10 +704,11 @@ def test_run_briefing_merges_idea_news_in_production(monkeypatch, tmp_path, port
 
     assert rc == 0
     assert "base" in captured and "idea" in captured
-    # Die News im Faktenpaket enthalten die gezielte Recherche; Apple-News nur einmal
-    # (Duplikat aus der Ideen-Recherche wird nicht doppelt uebernommen).
-    assert "NVIDIA News" in seen_titles
-    assert "Apple News" in seen_titles
+    # Die News-Liste des Faktenpakets enthält die gezielte Recherche; Apple-News
+    # nur einmal (Duplikat aus der Ideen-Recherche wird nicht doppelt uebernommen).
+    titles = {n.get("title") for n in seen_news}
+    assert "NVIDIA News" in titles
+    assert "Apple News" in titles
 
 
 # --- Doku-Generierung (Phase B / §7) ------------------------------------------

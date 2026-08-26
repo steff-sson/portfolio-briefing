@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from scripts import final_briefing
-from scripts.final_briefing import render_final_briefing
+from scripts.final_briefing import render_final_briefing, render_verify_paragraph
 
 # Kurzer Output-Contract (Phase 5): exakt diese 5 Sektionen, feste Reihenfolge.
 SHORT_SECTIONS = [
@@ -441,3 +441,67 @@ class TestRegressionRealMockData:
         assert "|" not in text
         for section in LEGACY_SECTIONS:
             assert section not in text
+
+
+# --- Plan P4: deterministischer Verify-Status-Absatz ---------------------------
+# render_verify_paragraph ist rein darstellend (kein Gate, keine Fakten):
+# zaehlt critical/major/minor/info aus verification + review.findings, nennt
+# overall_verdict (falls vorhanden) und gate_reason. Deterministisch, kein IO.
+
+
+def _finding(severity: str) -> dict:
+    return {"severity": severity, "issue": "test", "evidence": "test", "correction": "test"}
+
+
+class TestRenderVerifyParagraph:
+    def test_pass_empty_sources(self):
+        """Leere Quellen + gate_reason 'pass' -> PASS-Absatz (P4-Contract)."""
+        text = render_verify_paragraph([], {"findings": [], "overall_verdict": "pass"}, "pass")
+        assert text.startswith("## Verifizierung")
+        assert "Verify: PASS — 0 findings." in text
+        assert "Review: PASS — 0 findings (overall_verdict: pass)." in text
+        assert "final_gate: pass." in text
+
+    def test_with_findings_counts(self):
+        """Findings aus beiden Quellen korrekt gezaehlt: Verify-Zeile zaehlt
+        gesamt (verification + review.findings), Review-Zeile nur review."""
+        verification = [_finding("critical"), _finding("critical"), _finding("minor")]
+        review = {"findings": [_finding("major"), _finding("info")], "overall_verdict": "revise"}
+        text = render_verify_paragraph(verification, review, "overall_verdict=revise")
+        # Gesamt: 2 critical (verify) + 1 major + 1 minor (verify) + 1 info (review)
+        assert "Verify: PASS — 2 critical, 1 major, 1 minor, 1 info." in text
+        # Review-Zeile: nur review.findings (alle 4 Severity-Counts)
+        assert "Review: PASS — 0 critical, 1 major, 0 minor, 1 info (overall_verdict: revise)." in text
+        assert "final_gate: overall_verdict=revise." in text
+
+    def test_defaults_and_missing_review(self):
+        """review={} (defensiv) -> keine Exception, 'Review: PASS — 0 findings.'."""
+        text = render_verify_paragraph(None, {}, None)
+        assert "Verify: PASS — 0 findings." in text
+        assert "Review: PASS — 0 findings." in text
+        assert "final_gate: pass." in text
+
+    def test_review_without_verdict_no_exception(self):
+        """review ohne overall_verdict -> Zeile ohne Verdict-Klammer."""
+        text = render_verify_paragraph([], {"findings": []}, "pass")
+        assert "Review: PASS — 0 findings." in text
+        assert "(overall_verdict:" not in text
+
+    def test_deterministic_across_calls(self):
+        """Gleicher Input -> exakt gleicher Output (kein IO, keine Randomness)."""
+        verification = [_finding("critical"), _finding("minor")]
+        review = {"findings": [_finding("major")], "overall_verdict": "pass"}
+        text1 = render_verify_paragraph(verification, review, "pass")
+        text2 = render_verify_paragraph(verification, review, "pass")
+        assert text1 == text2
+        # Gesamt: 1 critical + 1 major + 1 minor (kein info)
+        assert "Verify: PASS — 1 critical, 1 major, 1 minor, 0 info." in text1
+
+    def test_contains_no_facts_or_isins(self):
+        """Absatz enthaelt keine Fakten-Zahlen/ISIN/Labels — nur Counts/Verdict."""
+        verification = [_finding("critical")]
+        text = render_verify_paragraph(verification, {"findings": [], "overall_verdict": "pass"}, "pass")
+        assert "critical" in text
+        assert "24.8" not in text
+        assert re.search(r"[A-Z]{2}[A-Z0-9]{9}\d", text) is None
+        assert "BUY" not in text and "SELL" not in text

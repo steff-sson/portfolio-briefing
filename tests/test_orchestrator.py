@@ -16,6 +16,7 @@ from scripts import (
     filter_news,
     final_briefing,
     llm_briefing,
+    llm_humanize,
     llm_review,
     llm_revise,
     run_briefing,
@@ -97,8 +98,6 @@ def _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions, news=None) ->
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: EMPTY_ANALYSIS)
     monkeypatch.setattr(filter_news, "fetch_and_filter_news", lambda p: news or [])
     return calls
-
-
 def _fake_send(sent):
     def _send(text, mode):
         sent.append((text, mode))
@@ -107,12 +106,32 @@ def _fake_send(sent):
     return _send
 
 
+def _real_humanized() -> str:
+    """Contract-konformer Humanizer-Output (kurze Sektionen + Disclaimer)."""
+    return (
+        "## Kurzlage\n"
+        "Alles im grünen Bereich.\n\n"
+        "## Datenqualität\n"
+        "—\n\n"
+        "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+        "Keine Verkaufs- oder Reduktionssignale für bestehende Satellites.\n\n"
+        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
+        "nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+        "## Watchlist-Signale\n"
+        "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n\n"
+        "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) "
+        "nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+        "## Nächster Schritt\n"
+        "Nächste Woche neuer Lauf, keine Aktion erforderlich."
+    )
+
+
 def test_pass_pipeline_sends_briefing(monkeypatch, tmp_path, portfolio, transactions):
     """Pass: Draft + Review ok -> Versand, rc 0."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -127,7 +146,7 @@ def test_block_verdict_is_fail_closed(monkeypatch, tmp_path, portfolio, transact
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     review = {"findings": [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}], "overall_verdict": "block"}
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
 
@@ -143,7 +162,7 @@ def test_malformed_review_is_fail_closed(monkeypatch, tmp_path, portfolio, trans
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _bad_review(facts_package, draft):
         raise llm_review.LLMError("Review-Antwort ist kein gueltiges JSON")
@@ -163,7 +182,7 @@ def test_missing_review_key_is_fail_closed(monkeypatch, tmp_path, portfolio, tra
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _missing_key(facts_package, draft):
         raise llm_review.LLMError("Review-Antwort enthaelt keinen 'findings'-Schluessel.")
@@ -185,7 +204,7 @@ def test_major_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transacti
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _bad_render(facts_package, mode="monday"):
         # Gerenderter Text enthaelt einen Ticker, den das Portfolio nicht kennt.
@@ -214,7 +233,7 @@ def test_critical_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transa
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _broken_render(facts_package, mode="monday"):
         # Nur 1 von 6 Sektionen -> verify findet critical (fehlende Sektion).
@@ -236,7 +255,7 @@ def test_minor_verify_finding_does_not_block(monkeypatch, tmp_path, portfolio, t
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions, news=news)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -260,7 +279,7 @@ def test_final_render_hook_runs_after_draft(monkeypatch, tmp_path, portfolio, tr
     render_calls = {"n": 0}
     real_render = final_briefing.render_final_briefing
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: seen.update(reviewed=draft) or PASS_REVIEW)
 
     def _render(facts_package, mode="monday"):
@@ -290,7 +309,7 @@ def test_final_render_hook_runs_again_after_revision(monkeypatch, tmp_path, port
     render_calls = {"n": 0}
     real_render = final_briefing.render_final_briefing
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": _real_humanized())
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: seen.append(draft) or (PASS_REVIEW if len(seen) > 1 else REVISE_REVIEW))
     monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: VALID_DRAFT)
 
@@ -336,7 +355,7 @@ def test_final_render_error_is_fail_closed(monkeypatch, tmp_path, portfolio, tra
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _broken_render(facts_package, mode="monday"):
         raise RuntimeError("Renderer-Bug")
@@ -371,7 +390,7 @@ def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, t
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _broken_verify(facts_package, draft):
         raise RuntimeError("interner Verify-Bug")
@@ -393,7 +412,7 @@ def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, 
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _llm_error_verify(facts_package, draft):
         raise llm_briefing.LLMError("Draft sieht nach LLM-Fehlertext aus (Marker 'fehlgeschlagen').")
@@ -413,7 +432,7 @@ def test_gate_alert_has_no_false_traceback(monkeypatch, tmp_path, portfolio, tra
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     review = {"findings": [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}], "overall_verdict": "block"}
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
 
@@ -495,7 +514,7 @@ def test_hallucinated_deterministic_review_does_not_block(monkeypatch, tmp_path,
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: HALLUCINATED_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -512,7 +531,7 @@ def test_real_review_finding_still_blocks(monkeypatch, tmp_path, portfolio, tran
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     review = {"findings": REAL_REVIEW_FINDINGS, "overall_verdict": "block"}
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
 
@@ -587,7 +606,7 @@ def test_pass_verdict_skips_revision(monkeypatch, tmp_path, portfolio, transacti
     sent = []
     revise_calls = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     def _no_revise(facts_package, draft, review):
@@ -609,7 +628,7 @@ def test_revise_then_successful_revision_sends(monkeypatch, tmp_path, portfolio,
     sent = []
     revise_calls = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", _sequential_review(REVISE_REVIEW, PASS_REVIEW))
     monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: (revise_calls.append(1), VALID_DRAFT)[1])
 
@@ -628,7 +647,7 @@ def test_revise_second_verify_blocks(monkeypatch, tmp_path, portfolio, transacti
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", _sequential_review(REVISE_REVIEW, PASS_REVIEW))
     monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: VALID_DRAFT)
 
@@ -668,7 +687,7 @@ def test_max_revisions_blocks_after_one_attempt(monkeypatch, tmp_path, portfolio
     sent = []
     revise_calls = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", _sequential_review(REVISE_REVIEW))
     monkeypatch.setattr(llm_revise, "revise_draft", lambda facts_package, draft, review: (revise_calls.append(1), VALID_DRAFT)[1])
 
@@ -686,7 +705,7 @@ def test_revise_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, trans
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: REVISE_REVIEW)
 
     def _broken_revise(facts_package, draft, review):
@@ -727,7 +746,7 @@ def test_non_dry_run_refresh_capture_diff_before_analyze(monkeypatch, tmp_path, 
     )
     monkeypatch.setattr(diff, "diff_snapshots", lambda prev, cur: (order.append("diff"), changes)[1])
     monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: (order.append("analyze"), EMPTY_ANALYSIS)[1])
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send([]))
 
@@ -739,7 +758,8 @@ def test_non_dry_run_refresh_capture_diff_before_analyze(monkeypatch, tmp_path, 
 
 
 def test_changes_flow_into_facts_package(monkeypatch, tmp_path, portfolio, transactions):
-    """Diff-Ergebnis fliessen als changes in das Faktenpaket (generate_draft sieht es)."""
+    """Diff-Ergebnis fliessen als changes in das Faktenpaket (build_facts_package
+    erhaelt die changes des Diffs und reicht sie 1:1 durch)."""
     captured = {}
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     previous = snapshot.build_snapshot(portfolio, transactions, mode="monday", captured_at="2026-08-06T10:00:00+00:00")
@@ -748,19 +768,26 @@ def test_changes_flow_into_facts_package(monkeypatch, tmp_path, portfolio, trans
         snapshot.build_snapshot(portfolio, transactions, mode="monday", captured_at="2026-08-13T10:00:00+00:00"),
     )
     monkeypatch.setattr(diff, "diff_snapshots", lambda prev, cur: changes)
-    monkeypatch.setattr(
-        llm_briefing,
-        "generate_draft",
-        lambda facts_package, mode="monday": (captured.update(facts=facts_package), VALID_DRAFT)[1],
-    )
+    # Der einzige Abfangpunkt für das Faktenpaket ist build_facts_package: der
+    # produktive Pfad rendert danach deterministisch und uebergibt dem
+    # Humanizer nur noch den Text. Hier wird nur durchgereicht, nichts verfremdet.
+    real_build = facts.build_facts_package
+
+    def _build_facts(*args, **kwargs):
+        pkg = real_build(*args, **kwargs)
+        captured["changes"] = pkg.get("changes")
+        return pkg
+
+    monkeypatch.setattr(facts, "build_facts_package", _build_facts)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send([]))
 
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 0
-    assert captured["facts"]["changes"] == changes
-    assert captured["facts"]["changes"]["has_previous"] is True
+    assert captured["changes"] == changes
+    assert captured["changes"]["has_previous"] is True
 
 
 def test_dry_run_passes_changes_none(monkeypatch, tmp_path, portfolio, transactions):
@@ -814,7 +841,7 @@ def test_failed_run_discards_staged_snapshot(monkeypatch, tmp_path, portfolio, t
     calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
 
     def _bad_review(facts_package, draft):
         raise llm_review.LLMError("Review-Antwort ist kein gueltiges JSON")
@@ -840,7 +867,7 @@ def test_successful_run_promotes_staged(monkeypatch, tmp_path, portfolio, transa
     calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: PASS_REVIEW)
 
     rc = run_briefing.run("monday", dry_run=False)
@@ -857,7 +884,7 @@ def test_staged_snapshot_not_promoted_on_gate_block(monkeypatch, tmp_path, portf
     calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    monkeypatch.setattr(llm_briefing, "generate_draft", lambda facts_package, mode="monday": VALID_DRAFT)
+    monkeypatch.setattr(llm_humanize, "humanize_briefing", lambda briefing_text, mode="monday": briefing_text)
     review = {"findings": [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}], "overall_verdict": "block"}
     monkeypatch.setattr(llm_review, "review_draft", lambda facts_package, draft: review)
 

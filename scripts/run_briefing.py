@@ -10,14 +10,17 @@ promote_staged zur Baseline; jeder Fehlerpfad davor verwirft staged
 (discard_staged) — fehlgeschlagene Laeufe schreiben die Baseline nie fort.
 Persistenz nur ueber das Snapshot-Modul (kein update_config).
 
-Deterministisches Faktenpaket → DeepSeek-Draft → final_briefing-Render →
-verify_draft → glm-5.2-Review → (bedingt: deepseek-v4-flash-Revision,
-maximal MAX_REVISIONS, danach erneuter Render + verify) → final_gate →
-Versand. overall_verdict `block`, kritische Findings, ungueltiges Review
-oder wiederholte Verify-Fehler blockieren den Versand fail-closed (nur
-Alert, keine Vault-Datei). Der produktive Verify-/Review-/Final-Gate-Pfad
-prueft den gerenderten Text (Teil 2); der Dry-Run-Pfad nutzt unveraendert
-_dry_run_placeholder.
+Deterministisches Faktenpaket → final_briefing-Render (fachliche Quelle) →
+llm_humanize.humanize_briefing (sprachliche Umschreibung, fail-closed, kein
+Fallback auf die deterministische Rohfassung) → verify_draft →
+glm-5.2-Review → (bedingt: deepseek-v4-flash-Revision, maximal
+MAX_REVISIONS, danach erneuter Render + Humanize + verify) → final_gate →
+deterministischer Verify-Status-Absatz (render_verify_paragraph, letzter
+Absatz, NICHT humanisiert) → Versand. overall_verdict `block`, kritische
+Findings, ungueltiges Review oder wiederholte Verify-Fehler blockieren den
+Versand fail-closed (nur Alert, keine Vault-Datei). Der produktive Verify-/
+Review-/Final-Gate-Pfad prueft den gehumanisierten Text; der Dry-Run-Pfad
+nutzt unveraendert _dry_run_placeholder (kein Render, kein Humanizer-Call).
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from scripts import (
     filter_news,
     final_briefing,
     llm_briefing,
+    llm_humanize,
     llm_review,
     llm_revise,
     render_markdown,
@@ -362,37 +366,38 @@ def run(mode: str, dry_run: bool = False) -> int:
                 _alert(f"facts failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 2: DeepSeek-Draft (im Dry-Run Platzhalter, kein LLM-Call).
-        # Danach folgt IMMER der deterministische Final-Render (Teil 2):
-        # der produktive Verify-/Review-/Final-Gate-Pfad prueft den
-        # gerenderten Text, nicht den rohen LLM-Draft. Der Dry-Run-Pfad
-        # behaelt unveraendert _dry_run_placeholder (kein Render).
+        # Stufe 2: deterministische Quelle (kein LLM-Draft mehr). Der
+        # deterministische Render (final_briefing.render_final_briefing) ist
+        # die einzige fachliche Quelle (Fakten/Zahlen/Sektionen/Labels); der
+        # LLM-Draft-Pfad (llm_briefing.generate_draft) ist abgeloest. Im
+        # Dry-Run bleibt der Platzhalter _dry_run_placeholder (kein Render,
+        # kein LLM-Call).
         try:
             if dry_run:
                 draft = _dry_run_placeholder(facts_package)
             else:
-                draft = llm_briefing.generate_draft(facts_package, mode=mode)
-            logging.info("draft completed")
-        except llm_briefing.LLMError as e:
-            # Fail-closed: LLM-Fehler duerfen nie als Briefing versendet werden.
-            _alert(f"draft failed (fail-closed): {e}\n{traceback.format_exc()}")
-            return 1
+                draft = final_briefing.render_final_briefing(facts_package, mode=mode)
+                logging.info("deterministic briefing rendered (Quelle)")
         except Exception as e:
-            _alert(f"draft failed: {e}\n{traceback.format_exc()}")
+            _alert(f"final render failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 2b: deterministischer Final-Render (Teil 2) — der LLM-Draft
-        # wird vollstaendig ersetzt: ab hier prueft verify/review/gate den
-        # gerenderten Briefing-Text (Kurzlage/Datenqualitaet/Punkte/
-        # Strategie/News/Empfehlung) 1:1 aus dem Faktenpaket. Render-Fehler
-        # sind fail-closed (kein Versand, keine Vault-Datei). Dry-Run
-        # ueberspringt den Render unveraendert (Platzhalter-Pfad).
+        # Stufe 2b: Humanizer (P1-P3) — LLM schreibt ausschliesslich die
+        # Sprache des deterministischen Briefings um (Fakten/Sektionen/
+        # Zahlen/Labels bleiben unveraendert, llm_humanize validiert das).
+        # Fail-closed: bei Humanizer-Fehler wird NICHT auf die
+        # deterministische Rohfassung zurueckgefallen (kein Fallback,
+        # User-Vorgabe) — nur Alert + Diagnose, kein Versand, keine
+        # Vault-Datei. Dry-Run ueberspringt den Humanizer unveraendert.
         if not dry_run:
             try:
-                draft = final_briefing.render_final_briefing(facts_package, mode=mode)
-                logging.info("final briefing rendered (Teil 2)")
+                draft = llm_humanize.humanize_briefing(draft, mode=mode)
+                logging.info("briefing humanized")
+            except llm_humanize.LLMError as e:
+                _alert(f"humanize failed (fail-closed, kein Fallback): {e}\n{traceback.format_exc()}")
+                return 1
             except Exception as e:
-                _alert(f"final render failed: {e}\n{traceback.format_exc()}")
+                _alert(f"humanize failed: {e}\n{traceback.format_exc()}")
                 return 1
 
         # Stufe 3: deterministische Draft-Verifikation
@@ -465,15 +470,26 @@ def run(mode: str, dry_run: bool = False) -> int:
                         return 1
                     revision_count += 1
                     logging.info(f"revise completed ({revision_count}/{MAX_REVISIONS})")
-                    # Stufe 2b erneut: nach jeder Revision wird der Draft
-                    # erneut deterministisch gerendert (Teil 2) — verify und
-                    # Review pruefen immer den gerenderten Text, nie den
-                    # rohen LLM-Output. Render-Fehler sind fail-closed.
+                    # Stufe 2 + 2b erneut: nach jeder Revision wird der Draft
+                    # erneut deterministisch gerendert und anschliessend
+                    # gehumanisiert — verify und Review pruefen immer den
+                    # (gehumanisierten) Text, nie den rohen Revise-Output.
+                    # Render- und Humanizer-Fehler sind fail-closed (kein
+                    # Fallback auf die Rohfassung).
                     try:
                         draft = final_briefing.render_final_briefing(facts_package, mode=mode)
-                        logging.info("final briefing re-rendered after revision (Teil 2)")
+                        logging.info("final briefing re-rendered after revision (Quelle)")
                     except Exception as e:
                         _alert(f"final render failed: {e}\n{traceback.format_exc()}")
+                        return 1
+                    try:
+                        draft = llm_humanize.humanize_briefing(draft, mode=mode)
+                        logging.info("briefing re-humanized after revision")
+                    except llm_humanize.LLMError as e:
+                        _alert(f"humanize failed (fail-closed, kein Fallback): {e}\n{traceback.format_exc()}")
+                        return 1
+                    except Exception as e:
+                        _alert(f"humanize failed: {e}\n{traceback.format_exc()}")
                         return 1
                     # Stufe 3 erneut: revidierten Draft deterministisch verifizieren
                     try:
@@ -498,6 +514,22 @@ def run(mode: str, dry_run: bool = False) -> int:
             _alert(f"Briefing blockiert (final_gate): {gate.reason}")
             return 1
         logging.info(f"final_gate: {gate.reason}")
+
+        # Stufe 6b: deterministischer Verify-Status-Absatz (P4) — rein
+        # darstellend (Counts + Verdict + Gate-Reason, keine Fakten). Wird
+        # NACH final_gate PASS als LETZTER Absatz an den (gehumanisierten)
+        # Text angehaengt und laeuft NICHT durch den Humanizer (deterministisch,
+        # kein LLM-Call). Kein Re-Verify noetig: der Absatz enthaelt keine
+        # Fakten/Zahlen/ISIN/Labels, die verify_draft pruefen wuerde.
+        try:
+            verify_paragraph = final_briefing.render_verify_paragraph(
+                verification, review, gate.reason
+            )
+            draft = f"{draft}\n\n{verify_paragraph}"
+            logging.info("verify paragraph appended")
+        except Exception as e:
+            _alert(f"verify paragraph failed: {e}\n{traceback.format_exc()}")
+            return 1
 
         date = datetime.now().strftime("%Y-%m-%d")
         try:
