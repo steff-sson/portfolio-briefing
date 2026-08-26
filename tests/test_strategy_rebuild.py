@@ -234,6 +234,73 @@ def test_core_satellite_uses_strategy_classification():
     assert result["unknown_value_eur"] == 0.0
 
 
+def test_positions_use_strategy_classification():
+    """calculate_positions: Strategie-Klassifikation (confirmed) bestimmt die
+    Positions-Kategorie — überschreibt Rohdaten und etf_lookup."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True},
+        "LU2722255754": {"category": "legacy", "confirmed": True},
+    })
+    portfolio = {
+        "holdings": [
+            # Rohdaten sagen satellite, Lookup (core) sagt core -> Strategie core gewinnt.
+            {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "satellite", "value_eur": 6000.0},
+            # Rohdaten unknown, Strategie legacy -> legacy gewinnt.
+            {"isin": "LU2722255754", "name": "SUSE", "category": "unknown", "value_eur": 0.0},
+            # Nicht klassifiziert -> Rohdaten bleiben.
+            {"isin": "US0378331005", "name": "Apple", "category": "satellite", "value_eur": 4000.0},
+        ]
+    }
+    result = analyze.calculate_positions(portfolio, strategy)
+    by_isin = {p["isin"]: p["category"] for p in result["positions"]}
+    assert by_isin["IE00BK5BQT80"] == "core"
+    assert by_isin["LU2722255754"] == "legacy"
+    assert by_isin["US0378331005"] == "satellite"
+
+
+def test_positions_unconfirmed_keeps_raw_category():
+    """calculate_positions: unbestätigte Klassifikation (confirmed fehlt/false)
+    gilt nicht — Rohdaten-Kategorie bleibt (fail-closed, keine Heuristik)."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": False},
+    })
+    portfolio = {
+        "holdings": [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "satellite", "value_eur": 6000.0},
+        ]
+    }
+    result = analyze.calculate_positions(portfolio, strategy)
+    assert result["positions"][0]["category"] == "satellite"
+
+
+def test_positions_without_strategy_keeps_raw_category():
+    """calculate_positions ohne Strategie (Abwärtskompatibilität): Rohdaten-/
+    Lookup-Kategorie bleibt, kein Strategie-Zugriff."""
+    portfolio = {
+        "holdings": [
+            {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 6000.0},
+            {"isin": "US0378331005", "name": "Apple", "value_eur": 4000.0},
+        ]
+    }
+    result = analyze.calculate_positions(portfolio)
+    by_isin = {p["isin"]: p["category"] for p in result["positions"]}
+    assert by_isin["IE00BK5BQT80"] == "core"
+    assert by_isin["US0378331005"] == "unknown"
+
+
+def test_drift_uses_strategy_classification():
+    """calculate_drift nutzt die Strategie-Klassifikation (confirmed) statt Rohdaten."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True},
+    })
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "unknown", "weight": 0.8},
+        {"isin": "US0378331005", "name": "Apple", "category": "satellite", "weight": 0.2},
+    ]
+    result = analyze.calculate_drift(positions, strategy)
+    assert result["core_ratio_actual"] == 0.8
+
+
 def _signal_strategy_fixture() -> dict:
     """Signal-taugliche Strategie: preferred/excluded Sektoren wie test_analyze."""
     import copy

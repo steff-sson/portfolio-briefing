@@ -571,7 +571,15 @@ def _strategy_isin_classification(holding: dict, strategy: dict) -> str | None:
     return None
 
 
-def calculate_positions(portfolio: dict) -> dict:
+def calculate_positions(portfolio: dict, strategy: dict | None = None) -> dict:
+    """Positionsobjekte aus den Holdings (Gewichte, Kategorie, Sektor).
+
+    Kategorie je Position: Strategie-Klassifikation (confirmed) -> Rohdaten-
+    category -> etf_lookup -> "unknown" (siehe _holding_category). Ohne
+    Strategie (None) bleibt die Rohdaten-/Lookup-Kategorie erhalten
+    (Abwaertskompatibilitaet: bestehende Aufrufer ohne Strategie-Kontext
+    verhalten sich unveraendert).
+    """
     holdings = portfolio.get("holdings", [])
     if not isinstance(holdings, list):
         holdings = []
@@ -587,7 +595,7 @@ def calculate_positions(portfolio: dict) -> dict:
         positions.append({
             "isin": h.get("isin"),
             "name": h.get("name"),
-            "category": h.get("category") or "unknown",
+            "category": _holding_category(h, strategy) if strategy is not None else (h.get("category") or "unknown"),
             "value_eur": val,
             "weight": round(val / total, 4) if total else 0,
             "sector": h.get("sector"),
@@ -2053,7 +2061,7 @@ def build_briefing_decisions(
 def analyze_portfolio(portfolio: dict, transactions: list, strategy: dict | None = None) -> dict:
     if strategy is None:
         strategy = load_strategy()
-    positions = calculate_positions(portfolio)
+    positions = calculate_positions(portfolio, strategy)
     pos_list = positions["positions"]
     checks = {
         "positions": positions,
