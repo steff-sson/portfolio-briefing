@@ -50,6 +50,11 @@ FUNDAMENTALS_DISCLAIMER = (
 RECOMMENDATION_LABELS = ("BUY", "SELL", "WATCH")
 
 # Sektionen fuer die Optionen-/Status-Kontextpruefung (Plan Phase 2.4/2.6).
+# Die Options-Sektion '## Entscheidungsrelevante Punkte' existiert im
+# 6-Sektionen-Contract nicht mehr — der Options-Block-Check bleibt fuer
+# Legacy-Formulierungen erhalten (Tests). Empfehlungs-/Handlungsphrasen
+# sind im neuen Contract in '## Empfehlung'/'## Nächster Schritt' zulaessig
+# (siehe _verify_recommendation_scope).
 _OPTIONS_SECTION = "## Entscheidungsrelevante Punkte"
 _KURZLAGE_SECTION = "## Kurzlage"
 
@@ -62,7 +67,8 @@ _REASON_MARKERS = ("begründung", "begruendung", "weil", "deshalb", "daher")
 _COUNTER_MARKERS = ("gegenargument", "gegenargumente", "risiko", "risiken")
 # Imperative Kauf-/Verkaufsanweisung — critical, auch innerhalb der Sektion.
 _IMPERATIVE_TERMS = ("kaufen sie", "verkaufen sie", "kauf sie", "verkauf sie")
-# Handlungsempfehlungen — critical ausserhalb der Optionen-Sektion.
+# Handlungsempfehlungen — critical ausserhalb der Empfehlungs-Sektionen
+# ('## Empfehlung', '## Nächster Schritt', 6-Sektionen-Contract).
 _RECOMMENDATION_TERMS = (
     "sie sollten",
     "empfehle",
@@ -496,6 +502,13 @@ def _facts_name_words(facts_package: dict | None) -> set[str]:
             items = summary.get(key)
             if isinstance(items, list):
                 sources.extend(items)
+    # Watchlist-Items (facts_package["watchlist"]) sind deterministische
+    # Paket-Fakten: deren Namen (z.B. "NVIDIA Corp.", "IONOS Group SE") sind
+    # legitime Referenzen im Watchlist-Signal-Kontext, keine erfundenen Ticker
+    # (Live-Fix, gleiches Muster wie Signal-Namen).
+    watchlist = facts_package.get("watchlist")
+    if isinstance(watchlist, list):
+        sources.extend(watchlist)
     for item in sources:
         if not isinstance(item, dict):
             continue
@@ -512,6 +525,9 @@ def _extract_tickers(text: str, facts_package: dict | None = None) -> set[str]:
         "LLM", "API", "HTTP", "USD", "EUR", "ETF", "MVP", "RSS", "Q4", "AI", "OK",
         "USA", "IPO", "CEO", "GDP", "CPI", "EPS", "NASDAQ", "NYSE", "CNBC", "DAX",
         "S&P", "MSCI", "FTSE",
+        # US-Inflationsindikator (Live-Fix): "PCE-Index" ist ein Konjunktur-
+        # Begriff aus den News-Titeln, kein Ticker (analog CPI/GDP).
+        "PCE",
         # Gesamt-Empfehlungs-Labels (Plan §6a) — keine Ticker.
         "BUY", "SELL", "WATCH",
         # Deterministische Signal-Labels (Signal-Status, keine Ticker):
@@ -623,6 +639,44 @@ def _holdings_weights_pct(facts_package: dict) -> list[float]:
         if isinstance(value, (int, float)) and value > 0:
             weights.append(round(value / total * 100, 1))
     return weights
+
+
+def _etf_ters_pct(facts_package: dict) -> list[float]:
+    """TER-Werte der Portfolio-ETFs aus config/etf_lookup.json (in Prozent).
+
+    Deterministische Konfig-Fakten (Live-Fix): das LLM darf legitime TER-
+    Angaben der ETFs nennen (z.B. 0.20% für einen iShares Core MSCI World),
+    die als statisches Fakt in etf_lookup.json hinterlegt sind. Die Datei
+    speichert TERs bereits in Prozent (ter 0.22 = 0.22%) — keine Ratio-
+    Umrechnung. Nur TERs von ISINs, die tatsaechlich im Portfolio liegen,
+    kommen in die Allowlist (fail-closed: unbekannte TERs bleiben critical).
+    Gibt es das Paket-Feld ``etf_ters_pct`` (z.B. via
+    facts.build_facts_package), wird es bevorzugt; sonst lazy aus der
+    Config-Datei gelesen (gleiche Quelle wie facts).
+    """
+    ters = facts_package.get("etf_ters_pct")
+    if isinstance(ters, list):
+        return [round(float(t), 2) for t in ters if isinstance(t, (int, float))]
+    try:
+        from scripts.analyze import load_etf_lookup  # lazy: vermeidet Import-Zyklus
+    except ImportError:
+        return []
+    holdings = facts_package.get("portfolio", {}).get("holdings", [])
+    if not isinstance(holdings, list):
+        return []
+    lookup = load_etf_lookup()
+    values: list[float] = []
+    for holding in holdings:
+        if not isinstance(holding, dict):
+            continue
+        isin = str(holding.get("isin", ""))
+        entry = lookup.get(isin)
+        if not isinstance(entry, dict):
+            continue
+        ter = entry.get("ter")
+        if isinstance(ter, (int, float)) and ter > 0:
+            values.append(round(float(ter), 2))
+    return values
 
 
 def _raw_check_name_violations(text: str) -> list[str]:
@@ -782,6 +836,43 @@ def _has_marker(content: str, markers: tuple[str, ...]) -> bool:
     )
 
 
+# Empfehlungs-Sektionen des 6-Sektionen-Contracts: Handlungsempfehlungen/
+# Empfehlungsphrasen sind hier zulaessig (die alte Options-Sektion
+# '## Entscheidungsrelevante Punkte' existiert nicht mehr).
+_RECOMMENDATION_SECTIONS = (RECOMMENDATION_SECTION, NEXT_STEP_SECTION)
+
+
+def _verify_recommendation_scope(text: str, findings: list[dict]) -> None:
+    """Handlungsempfehlungen nur in den Empfehlungs-Sektionen (neuer Contract).
+
+    Live-Blocker: der Legacy-Check erlaubte Empfehlungsphrasen ('sie sollten',
+    'empfehle', ...) nur in der alten Options-Sektion '## Entscheidungsrelevante
+    Punkte', die im 6-Sektionen-Contract nicht mehr existiert. Neuer Contract:
+    die Sektionen '## Empfehlung' und '## Nächster Schritt' sind die
+    Empfehlungs-Sektionen — dort bleiben die Phrasen erlaubt. Ausserhalb
+    (Kurzlage, Datenqualität, Signal-Sektionen) blocken sie weiterhin critical.
+    """
+    allowed_zones: list[str] = []
+    for section in _RECOMMENDATION_SECTIONS:
+        extracted = _extract_section(text, section)
+        if extracted is not None:
+            allowed_zones.append(extracted)
+    outside = text
+    for zone in allowed_zones:
+        outside = outside.replace(zone, "", 1)
+    for term in _RECOMMENDATION_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", outside, re.IGNORECASE):
+            findings.append(
+                _finding(
+                    "critical",
+                    f"Handlungsempfehlung außerhalb der Empfehlungs-Sektionen ('{term}')",
+                    f"Empfehlung '{term}' ausserhalb von {', '.join(_RECOMMENDATION_SECTIONS)}",
+                    f"Empfehlung in die Sektion '{RECOMMENDATION_SECTION}' oder '{NEXT_STEP_SECTION}' verschieben oder entfernen",
+                )
+            )
+            break
+
+
 def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     """Stage-3 gate: deterministic draft checks against the facts package.
 
@@ -911,9 +1002,13 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     allowed = _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
     allowed += _holdings_weights_pct(facts_package)  # Holdings-Gewichte sind deterministische Paket-Fakten
     allowed += _summary_watchlist_scores(summary)  # Phase 5: Signal-Score-Ganzzahlen
+    allowed += _etf_ters_pct(facts_package)  # ETF-TERs aus etf_lookup.json (statische Konfig-Fakten)
     allowed_formatted = sorted({f"{value:.1f}" for value in allowed})
+    allowed_exact_2 = sorted({f"{value:.2f}" for value in allowed if value < 1.0})
     for num in _extract_numbers(text):
-        if f"{num:.1f}" not in allowed_formatted:
+        if f"{num:.1f}" not in allowed_formatted and not (
+            num < 1.0 and f"{num:.2f}" in allowed_exact_2
+        ):
             findings.append(
                 _finding(
                     "critical",
@@ -991,7 +1086,9 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     #    Begruendung + Gegenargument/Risiko im SELBEN Absatz (Blank-Zeile-
     #    getrennt) — ein Marker einer anderen Option zaehlt nicht; imperative
     #    Kauf-/Verkaufsanweisung bleibt critical; sonstige Empfehlungen
-    #    ausserhalb der Optionen-Sektion bleiben critical.
+    #    ausserhalb der Empfehlungs-Sektionen bleiben critical (neuer
+    #    6-Sektionen-Contract: '## Empfehlung'/'## Nächster Schritt' sind die
+    #    Empfehlungs-Sektionen — die alte Options-Sektion existiert nicht mehr).
     triggers = compute_triggers(facts_package)
     options_section = _extract_section(text, _OPTIONS_SECTION)
     options_content = _section_content(options_section) or ""
@@ -1039,21 +1136,8 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 )
             )
             break
-    # Sonstige Empfehlungen ausserhalb der Optionen-Sektion — critical.
-    outside = text
-    if options_section is not None:
-        outside = text.replace(options_section, "", 1)
-    for term in _RECOMMENDATION_TERMS:
-        if re.search(rf"\b{re.escape(term)}\b", outside, re.IGNORECASE):
-            findings.append(
-                _finding(
-                    "critical",
-                    f"Handlungsempfehlung außerhalb der Optionen-Sektion ('{term}')",
-                    f"Empfehlung '{term}' ausserhalb von '{_OPTIONS_SECTION}'",
-                    "Empfehlung entfernen oder als Option (halten/reduzieren/aufstocken) mit Begründung und Gegenargument in der Sektion formulieren",
-                )
-            )
-            break
+    # Sonstige Empfehlungen ausserhalb der Empfehlungs-Sektionen — critical.
+    _verify_recommendation_scope(text, findings)
 
     return findings
 

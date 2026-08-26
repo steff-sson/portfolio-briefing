@@ -53,11 +53,14 @@ def _load_prompt(mode: str, context: dict) -> str:
 def _zulaessige_zahlen_block(facts_package: dict) -> str:
     """Deterministische ``ZULÄSSIGE ZAHLEN``-Allowlist am Prompt-Ende.
 
-    Vereinigt summary-Prozente, Strategie-Grenzwerte und Holdings-Gewichte —
-    alle direkt aus verify (gleiche Quelle wie das Gate, kann nie
-    divergieren): dedupliziert, absteigend sortiert, 1 Dezimalstelle.
+    Vereinigt summary-Prozente, Strategie-Grenzwerte, Holdings-Gewichte und
+    ETF-TERs — alle direkt aus verify (gleiche Quelle wie das Gate, kann nie
+    divergieren): dedupliziert, absteigend sortiert. Werte >= 1.0 mit 1
+    Dezimalstelle (wie bisher), TERs (Werte < 1.0) mit 2 Dezimalstellen,
+    damit 0.08% in Prompt-Liste und Gate-Liste identisch sind.
     """
     from scripts.verify import (
+        _etf_ters_pct,
         _holdings_weights_pct,
         _strategy_thresholds_pct,
         _summary_numbers_pct,
@@ -70,12 +73,14 @@ def _zulaessige_zahlen_block(facts_package: dict) -> str:
             _summary_numbers_pct(summary)
             + _strategy_thresholds_pct(thresholds)
             + _holdings_weights_pct(facts_package)
+            + _etf_ters_pct(facts_package)
         ),
         reverse=True,
     )
-    if values:
-        numbers = ", ".join(f"{value:.1f}" for value in values)
-    else:
+    numbers = ", ".join(
+        f"{value:.2f}" if value < 1.0 else f"{value:.1f}" for value in values
+    )
+    if not numbers:
         numbers = "(keine — keine Prozentwerte zulässig)"
     return (
         "\n\n## ZULÄSSIGE ZAHLEN (nur diese dürfen im Briefing vorkommen)\n"

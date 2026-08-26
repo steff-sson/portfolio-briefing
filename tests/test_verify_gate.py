@@ -212,6 +212,43 @@ class TestVerifyDraft:
             {"portfolio": {"holdings": [{"value_eur": 75000.0}, {"value_eur": 25000.0}]}}
         ) == [75.0, 25.0]
 
+    def test_etf_ter_in_allowlist(self):
+        """Live-Fix: ETF-TERs aus config/etf_lookup.json sind deterministische
+        Konfig-Fakten — ein Draft mit 'TER 0.20%' (2 Dezimalstellen, Wert < 1)
+        loest KEIN Zahlen-Finding aus, auch wenn 0.20 auf 1 Dezimalstelle
+        '0.2' lauten wuerde (exakter 2-Dezimal-Vergleich fuer Werte < 1.0)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World UCITS ETF"},
+                {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World UCITS ETF"},
+            ]
+        }
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Die ETF-Kosten (TER) liegen bei 0.20% fuer den iShares Core MSCI World.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any(f["severity"] == "critical" and "passt nicht 1:1" in f["issue"] for f in findings)
+
+    def test_etf_ter_unknown_stays_critical(self):
+        """Fail-closed bleibt: eine TER, die in keinem Lookup-Eintrag steht
+        (0.55%), ist weiterhin critical — auch mit 2 Dezimalstellen."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [{"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World UCITS ETF"}]
+        }
+        draft = VALID_DRAFT.replace("24.8%", "0.55%")
+        findings = verify.verify_draft(facts, draft)
+        assert any(f["severity"] == "critical" and "0.55" in f["issue"] for f in findings)
+
+    def test_etf_ters_pct_fault_tolerant(self):
+        """_etf_ters_pct: Paket-Feld wird bevorzugt; ohne ISIN-Mapping -> []."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["etf_ters_pct"] = [0.2, 0.07]
+        assert verify._etf_ters_pct(facts) == [0.2, 0.07]
+        assert verify._etf_ters_pct({"portfolio": {"holdings": []}}) == []
+
     def test_comma_decimal_percentage_is_checked(self):
         """P0.3: Komma-Dezimalen werden erkannt — korrekter Wert passiert,
         halluzinierter Wert (88,8%) bleibt critical (kein Umgehen der Pruefung)."""
@@ -820,6 +857,42 @@ class TestOptionContract:
 
     def test_recommendation_outside_section_is_critical(self):
         """Empfehlung ('Sie sollten') ausserhalb der Optionen-Sektion -> critical."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = self._option_draft(reason=True, counter=True).replace(
+            "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%.",
+            "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%. Sie sollten die Position reduzieren.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert any(
+            f["severity"] == "critical" and "Handlungsempfehlung" in f["issue"] for f in findings
+        )
+
+    def test_recommendation_in_empfehlung_section_passes(self):
+        """Live-Fix (neuer 6-Sektionen-Contract): 'Sie sollten' in der
+        '## Empfehlung'-Sektion ist erlaubt — die alte Options-Sektion
+        existiert nicht mehr, die Empfehlungs-Sektion ist jetzt zulaessig."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = self._option_draft(reason=True, counter=True).replace(
+            "## Empfehlung\nWATCH — kein Handlungsbedarf.",
+            "## Empfehlung\nWATCH — Sie sollten die Position im Blick behalten und bei einer weiteren Drift-Zunahme reduzieren.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any("Handlungsempfehlung" in f["issue"] for f in findings)
+
+    def test_recommendation_in_naechster_schritt_section_passes(self):
+        """Live-Fix (neuer 6-Sektionen-Contract): 'Sie sollten' in der
+        '## Nächster Schritt'-Sektion ist erlaubt (Empfehlungs-Sektion)."""
+        facts = _facts_with_status_checks(red=["drift"])
+        draft = self._option_draft(reason=True, counter=True).replace(
+            "## Nächster Schritt\nNächste Woche neuer Lauf, keine Aktion erforderlich.",
+            "## Nächster Schritt\nSie sollten die Drift-Entwicklung naechste Woche beobachten.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any("Handlungsempfehlung" in f["issue"] for f in findings)
+
+    def test_recommendation_outside_empfehlung_sections_is_critical(self):
+        """Neuer Contract: 'Sie sollten' ausserhalb von '## Empfehlung'/
+        '## Nächster Schritt' (z.B. in der Kurzlage) bleibt critical."""
         facts = _facts_with_status_checks(red=["drift"])
         draft = self._option_draft(reason=True, counter=True).replace(
             "## Kurzlage\nApple (AAPL, US0378331005) bei 24.8%.",
