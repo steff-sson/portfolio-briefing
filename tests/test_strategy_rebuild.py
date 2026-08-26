@@ -967,3 +967,140 @@ def test_strategy_hash_version_consistency():
     strategy["portfolio"]["core_pct"] = 75.0
     h2 = analyze.strategy_hash(strategy)
     assert h1 != h2
+
+
+# --- P3: holdings_classification aus answers.reviewed.yaml emittieren ---------
+
+
+def _classification_answers(*items: tuple[str, dict]) -> dict:
+    """Antwort-Fixture: Planpfad holdings.classification.<ISIN> (value-Dict)."""
+    answers = _answers_fixture()
+    for isin, value in items:
+        answers["answers"][f"holdings.classification.{isin}"] = {
+            "value": value,
+            "status": "answered",
+            "date": "2026-08-26",
+            "source": "review",
+        }
+    return answers
+
+
+def _emit_with_answers(monkeypatch, tmp_path, answers: dict) -> dict:
+    """Emission gegen tmp_path mit beliebiger Antwort-Fixture."""
+    strategy_path = tmp_path / "strategy.yaml"
+    version_path = tmp_path / "strategy-version.txt"
+    monkeypatch.setattr(setup_strategy, "STRATEGY_PATH", strategy_path)
+    monkeypatch.setattr(setup_strategy, "VERSION_PATH", version_path)
+    monkeypatch.setattr(setup_strategy, "BACKUP_DIR", tmp_path / "backup")
+    answers_path = tmp_path / "answers.reviewed.yaml"
+    answers_path.write_text(
+        yaml.safe_dump(answers, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return setup_strategy.emit(answers_reviewed_path=answers_path)
+
+
+def test_emit_classification_block_written():
+    """Bestätigte Klassifikationen werden als holdings_classification.isins emittiert."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "core", "confirmed": True, "source": "user"}),
+        ("LU2722255754", {"category": "legacy", "confirmed": True, "source": "user"}),
+    )
+    emitted = setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
+    assert emitted["holdings_classification"]["isins"]["IE00BK5BQT80"] == {
+        "category": "core",
+        "confirmed": True,
+        "source": "user",
+    }
+    assert emitted["holdings_classification"]["isins"]["LU2722255754"]["category"] == "legacy"
+
+
+def test_emit_classification_schema_valid():
+    """Emitierte Klassifikation ist exakt P1-Schema-kompatibel (validate_strategy)."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "core", "confirmed": True}),
+    )
+    strategy = setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
+    # meta.* setzt erst emit(); Basis-Strategie + Klassifikation gegen das Schema pruefen.
+    import copy
+
+    full = copy.deepcopy(FULL_STRATEGY)
+    full["holdings_classification"] = strategy["holdings_classification"]
+    validation = analyze.validate_strategy(full)
+    assert validation["valid"] is True, validation["errors"]
+
+
+def test_emit_classification_block_absent_when_missing():
+    """Keine Klassifikations-Antworten -> kein Block, kein Fehler (abwärtskompatibel)."""
+    answers = _answers_fixture()
+    strategy = setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
+    assert "holdings_classification" not in strategy
+
+
+def test_emit_classification_unconfirmed_not_emitted():
+    """Nur confirmed: true wird emittiert; unbestätigte Einträge fehlen (keine Heuristik)."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "core", "confirmed": True}),
+        ("DE000BASF111", {"category": "core", "confirmed": False}),
+        ("US0378331005", {"category": "satellite"}),
+    )
+    strategy = setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
+    assert "holdings_classification" in strategy
+    isins = strategy["holdings_classification"]["isins"]
+    assert set(isins) == {"IE00BK5BQT80"}
+
+
+def test_emit_classification_invalid_category_fail_closed():
+    """Ungültige category -> SetupError (fail-closed)."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "mega", "confirmed": True}),
+    )
+    with pytest.raises(SetupError, match="category"):
+        setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
+
+
+def test_validate_answers_classification_invalid_category_blocked():
+    """_validate_answers_structure: ungültige category wird fail-closed blockiert."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "mega", "confirmed": True}),
+    )
+    errors = setup_strategy._validate_answers_structure(answers, analyze.load_strategy_schema())
+    assert any("category" in e and "core" in e for e in errors)
+
+
+def test_validate_answers_classification_unknown_fields_blocked():
+    """_validate_answers_structure: unbekannte Keys in einer Klassifikations-Antwort schlagen fehl."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "core", "confirmed": True, "quatsch": 1}),
+    )
+    errors = setup_strategy._validate_answers_structure(answers, analyze.load_strategy_schema())
+    assert any("quatsch" in e for e in errors)
+
+
+def test_emit_classification_full_flow(monkeypatch, tmp_path):
+    """End-to-End: emit() schreibt holdings_classification + Backup/Version/Hash bleiben."""
+    answers = _classification_answers(
+        ("IE00BK5BQT80", {"category": "core", "confirmed": True, "source": "user"}),
+    )
+    result = _emit_with_answers(monkeypatch, tmp_path, answers)
+    emitted = yaml.safe_load((tmp_path / "strategy.yaml").read_text(encoding="utf-8"))
+    # Klassifikation emittiert.
+    assert emitted["holdings_classification"]["isins"]["IE00BK5BQT80"]["category"] == "core"
+    # Bestehende Emission unverändert (Pflichtfelder + Version + Hash-Datei).
+    assert emitted["satellite_limits"]["max_trades_per_quarter"] == 5
+    assert emitted["portfolio"]["core_pct"] == 70.0
+    assert "external_provision" not in emitted["investor"]
+    assert result["version"] >= 1
+    assert (tmp_path / "strategy-version.txt").exists()
+    validation = analyze.validate_strategy(emitted)
+    assert validation["valid"] is True, validation["errors"]
+
+
+def test_emit_without_classification_backward_compatible(monkeypatch, tmp_path):
+    """emit() ohne Klassifikations-Antworten: kein Block, kein Fehler (Status quo)."""
+    answers = _answers_fixture()
+    result = _emit_with_answers(monkeypatch, tmp_path, answers)
+    emitted = yaml.safe_load((tmp_path / "strategy.yaml").read_text(encoding="utf-8"))
+    assert "holdings_classification" not in emitted
+    assert result["version"] >= 1
+    assert (tmp_path / "strategy-version.txt").exists()

@@ -40,6 +40,12 @@ VERSION_PATH = ROOT / "strategy" / "strategy-version.txt"
 # Mapping-Status, die in strategy.yaml emittiert werden (Plan §5[5]).
 _EMITTED_MAPPINGS = {"analyserelevant", "dokumentationsrelevant"}
 
+# Klassifikations-Antworten (Plan P3): Antwortpfad holdings.classification.<ISIN>
+# wird auf das P1-Schema holdings_classification.isins.<ISIN> gemappt. "holdings"
+# ist keine Schema-Sektion — der Adapter erkennt den Praefix explizit.
+_CLASSIFICATION_PREFIX = "holdings.classification."
+_CLASSIFICATION_CATEGORIES = ("core", "satellite", "legacy", "unknown")
+
 
 class SetupError(Exception):
     """Setup-/Validierungsfehler (fail-closed, kein LLM-Default)."""
@@ -129,6 +135,29 @@ def _validate_answers_structure(answers: dict, schema: dict) -> list[str]:
         if not isinstance(entry, dict) or "value" not in entry:
             errors.append(f"Antwort '{path}' muss ein Objekt mit 'value' sein")
             continue
+        if path.startswith(_CLASSIFICATION_PREFIX):
+            # Klassifikations-Antworten (Plan P3): value = {category, confirmed, source}.
+            # Fail-closed: category muss aus dem P1-Enum stammen (keine Heuristik,
+            # keine automatische Klassifikation); unbekannte Keys schlagen fehl.
+            value = entry["value"]
+            if not isinstance(value, dict):
+                errors.append(
+                    f"Antwort '{path}' muss ein Dict mit category/confirmed/source sein"
+                )
+                continue
+            unknown_keys = set(value) - {"category", "confirmed", "source"}
+            if unknown_keys:
+                errors.append(
+                    f"Antwort '{path}' enthaelt unbekannte Felder: {sorted(unknown_keys)} "
+                    "(nur category, confirmed, source erlaubt)"
+                )
+            category = value.get("category")
+            if category not in _CLASSIFICATION_CATEGORIES:
+                errors.append(
+                    f"Antwort '{path}': category muss einer der Werte sein: "
+                    f"{sorted(_CLASSIFICATION_CATEGORIES)}"
+                )
+            continue
         parts = path.split(".")
         key = (parts[0], parts[1]) if len(parts) >= 2 else (path, "")
         if key not in known and parts[0] not in {s for s, _, _ in _all_schema_fields(schema)}:
@@ -164,6 +193,45 @@ def _validate_emitted_strategy(strategy: dict) -> None:
 # --- Emission ----------------------------------------------------------------
 
 
+def _emit_classification_block(answer_map: dict) -> dict | None:
+    """holdings_classification.isins.<ISIN> aus den Klassifikations-Antworten.
+
+    Nur explizit bestaetigte Klassifikationen (confirmed: true) werden
+    emittiert — keine Heuristik, keine automatische Klassifikation.
+    category wird fail-closed gegen das P1-Enum geprueft (unbekannte Werte
+    sind bereits in _validate_answers_structure blockiert; hier als
+    Double-Check fuer direkte _emit_dict_from_answers-Aufrufer).
+
+    Rueckgabe: {"isins": {ISIN: {category, confirmed, source?}}} wenn
+    mindestens eine ISIN bestaetigt ist, sonst None (Block fehlt — das
+    emitierte strategy.yaml bleibt abwaertskompatibel).
+    """
+    isins: dict = {}
+    for path, entry in answer_map.items():
+        if not path.startswith(_CLASSIFICATION_PREFIX) or not isinstance(entry, dict):
+            continue
+        isin = path[len(_CLASSIFICATION_PREFIX):]
+        if not isin:
+            continue
+        value = entry.get("value")
+        if not isinstance(value, dict) or value.get("confirmed") is not True:
+            continue  # nur explizit bestaetigte Klassifikationen
+        category = value.get("category")
+        if category not in _CLASSIFICATION_CATEGORIES:
+            raise SetupError(
+                f"Antwort '{path}': category muss einer der Werte sein: "
+                f"{sorted(_CLASSIFICATION_CATEGORIES)}"
+            )
+        item = {"category": category, "confirmed": True}
+        source = value.get("source")
+        if isinstance(source, str) and source:
+            item["source"] = source
+        isins[isin] = item
+    if not isins:
+        return None
+    return {"isins": isins}
+
+
 def _emit_dict_from_answers(answers: dict, schema: dict) -> dict:
     """Emitiertes Strategie-Dict: nur Felder mit Mapping analyserelevant|dokumentationsrelevant.
 
@@ -196,6 +264,14 @@ def _emit_dict_from_answers(answers: dict, schema: dict) -> dict:
             continue
         strategy.setdefault(section, {})
         strategy[section][field] = value
+
+    # P3: holdings_classification aus den Klassifikations-Antworten emittieren
+    # (Antwortpfad holdings.classification.<ISIN> -> P1-Schema). Nur wenn
+    # mindestens eine ISIN bestaetigt ist; sonst bleibt der Block weg
+    # (Abwaertskompatibilitaet).
+    classification = _emit_classification_block(answer_map)
+    if classification is not None:
+        strategy["holdings_classification"] = classification
     return strategy
 
 
