@@ -1,4 +1,4 @@
-"""Orchestrator for portfolio briefing pipeline (Phase 4, two-stage + revise loop).
+"""Orchestrator for portfolio briefing pipeline (1-Call-Architektur).
 
 Datenbeschaffung: Dry-Run ausschliesslich ueber sc_bridge.load_mock() (kein
 sc-Aufruf, kein Snapshot-/Diff-Schreiben, kein Telegram-Alert bei Fehlern).
@@ -10,17 +10,13 @@ promote_staged zur Baseline; jeder Fehlerpfad davor verwirft staged
 (discard_staged) — fehlgeschlagene Laeufe schreiben die Baseline nie fort.
 Persistenz nur ueber das Snapshot-Modul (kein update_config).
 
-Deterministisches Faktenpaket → final_briefing-Render (fachliche Quelle) →
-llm_humanize.humanize_briefing (sprachliche Umschreibung, fail-closed, kein
-Fallback auf die deterministische Rohfassung) → verify_draft →
-glm-5.2-Review → (bedingt: deepseek-v4-flash-Revision, maximal
-MAX_REVISIONS, danach erneuter Render + Humanize + verify) → final_gate →
-deterministischer Verify-Status-Absatz (render_verify_paragraph, letzter
-Absatz, NICHT humanisiert) → Versand. overall_verdict `block`, kritische
-Findings, ungueltiges Review oder wiederholte Verify-Fehler blockieren den
-Versand fail-closed (nur Alert, keine Vault-Datei). Der produktive Verify-/
-Review-/Final-Gate-Pfad prueft den gehumanisierten Text; der Dry-Run-Pfad
-nutzt unveraendert _dry_run_placeholder (kein Render, kein Humanizer-Call).
+1-Call-Architektur (Plan 1-Call-Briefing): Faktenpaket -> EIN LLM-Call
+(llm_briefing.generate_draft, deepseek-v4-flash, fachliche Quelle) ->
+verify_draft (deterministisch, 1:1 gegen das Faktenpaket) -> final_gate
+(verification-only, fail-closed bei critical/major) -> Versand. Humanize-/
+Review-/Revise-Stufe und der deterministische final_briefing-Render sind
+entfernt. Der Dry-Run-Pfad nutzt unveraendert _dry_run_placeholder (kein
+LLM-Call).
 """
 from __future__ import annotations
 
@@ -37,11 +33,7 @@ from scripts import (
     diff,
     facts,
     filter_news,
-    final_briefing,
     llm_briefing,
-    llm_humanize,
-    llm_review,
-    llm_revise,
     render_markdown,
     sc_bridge,
     send_telegram,
@@ -54,137 +46,16 @@ LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "briefing.log"
 VAULT_DIR = Path.home() / "docs" / "notizen" / "portfolio-briefings"
 
-# Maximal eine Revision (Plan §6.1: max_revisions: 1) — kein Endlos-Loop.
-MAX_REVISIONS = 1
-
-# --- GLM-Review-Kontrakt: deterministische Sektionen --------------------------
-# Die Sektionen der finalen Briefing-Datei werden von Python deterministisch
-# aus dem Faktenpaket gerendert (final_briefing.py). Der Review-Prompt
-# (config/prompts/review.txt) verpflichtet GLM, dort KEINE eigenen Status-,
-# Zahlen-, Kategorien-, Transaktions- oder Strategieänderungen zu behaupten.
-# Trotzdem kann ein bestehendes Review-JSON solche halluzinierten Findings
-# enthalten. Der Orchestrator filtert ausschließlich Findings, die klar diese
-# deterministischen Sektionen/Fakten betreffen; andere echte Review-Findings
-# (unerlaubte Handlungsempfehlungen, ## Kurzlage-Verstöße gegen die
-# Zusammenfassung) bleiben fail-closed blockierend.
-#
-# Der Filter ist bewusst konservativ (Keyword-basiert, kein Textverständnis):
-# - Deterministische Sektionen werden nur als SUBJEKT des Findings (issue)
-#   gewertet — die bloße Nennung in evidence (z. B. "Kaufanweisung außerhalb
-#   von ## Entscheidungsrelevante Punkte") ist eine Ortsangabe, kein
-#   Fakten-Finding.
-# - Findings, die die ## Kurzlage erwähnen, werden NIE gefiltert: GLM darf die
-#   Kurzlage gegen die deterministische Zusammenfassung prüfen.
-# - Generische Terme wie status/zahl/rot/position werden bewusst NICHT als
-#   Filterkriterium genutzt — sie können in echten Kurzlage-Findings
-#   vorkommen und müssen dann fail-closed blockieren.
-_DETERMINISTIC_SECTIONS = (
-    "Datenqualität",
-    "Entscheidungsrelevante Punkte",
-    "Strategie-Abgleich",
-    "Relevante News & Veränderungen",
-    "Empfehlung",
-)
-# Wortgrenzen: "Handlungsempfehlung" trifft "Empfehlung" NICHT (nur die
-# eigenständige Sektions-/Label-Nennung), "Entscheidungsrelevante Punkte"
-# nur als vollständige Sektion.
-_DETERMINISTIC_SECTION_RE = re.compile(
-    r"(?i)\b(" + "|".join(re.escape(s) for s in _DETERMINISTIC_SECTIONS) + r")\b"
-)
-# Klare deterministische Fakten-Themen (Substring, case-insensitive):
-# Transaktionen, Datenqualität, gerenderte Veränderungszeilen (Hinzugekommen/
-# Entfernt/Geändert), Ampel-Kategorien. BUY/SELL/WATCH mit Wortgrenzen (das
-# deterministische Empfehlungs-Label).
-_DETERMINISTIC_FACT_TERMS = (
-    "datenqualität",
-    "datenqualitaet",
-    "transaktion",
-    "hinzugekommen",
-    "hinzugefügt",
-    "hinzugefuegt",
-    "entfernt",
-    "geändert",
-    "geaendert",
-    "ampel",
-    "kategorie",
-    "strategieänderung",
-    "strategieänderungen",
-    "strategie-aenderung",
-    "strategie-änderung",
-)
-_DETERMINISTIC_LABEL_RE = re.compile(r"(?i)\b(buy|sell|watch)\b")
-
-
-def _finding_touches_deterministic_sections(finding: dict) -> bool:
-    """True, wenn ein Review-Finding klar die deterministischen Sektionen
-    bzw. deterministische Fakten betrifft (konservativ, Keyword-basiert).
-
-    Treffer, wenn (a) eine deterministische Sektion als Subjekt (issue)
-    genannt ist — ## Datenqualität, ## Entscheidungsrelevante Punkte,
-    ## Strategie-Abgleich, ## Relevante News & Veränderungen, ## Empfehlung —
-    oder (b) ein deterministischer Faktenterm (Transaktionen, Datenqualität,
-    Hinzugekommen/Entfernt/Geändert, Ampel-Kategorie, BUY/SELL/WATCH-Label)
-    in issue/evidence/correction vorkommt. Findings, die die ## Kurzlage
-    betreffen, werden NIE gefiltert (GLM darf sie gegen die Zusammenfassung
-    prüfen); Findings ohne klaren Bezug (z. B. unerlaubte
-    Handlungsempfehlungen) bleiben fail-closed blockierend.
-    """
-    issue = str(finding.get("issue", ""))
-    evidence = str(finding.get("evidence", ""))
-    correction = str(finding.get("correction", ""))
-    haystack = f"{issue} {evidence} {correction}".lower()
-    # ## Kurzlage ist der EINZIGE semantische Review-Bereich: solche Findings
-    # sind echt (Zusammenfassungs-Abgleich) und dürfen nie gefiltert werden.
-    if "kurzlage" in haystack:
-        return False
-    if _DETERMINISTIC_SECTION_RE.search(issue):
-        return True
-    if _DETERMINISTIC_LABEL_RE.search(haystack):
-        return True
-    for term in _DETERMINISTIC_FACT_TERMS:
-        if term in haystack:
-            return True
-    return False
-
-
-def _filter_review_findings(review: object) -> dict:
-    """Filtert klar deterministische Review-Findings aus (defensiv, unverändert
-    bei Nicht-Dict/fehlendem findings-Key).
-
-    Nur Findings, die eindeutig die deterministischen Sektionen/Fakten
-    betreffen (siehe _finding_touches_deterministic_sections), werden entfernt.
-    Echte Review-Findings (unerlaubte Handlungsempfehlungen, ## Kurzlage-
-    Verstöße) bleiben erhalten und blockieren weiterhin fail-closed.
-
-    Wurden ALLE Findings als halluziniert gefiltert, hat das overall_verdict
-    keine verbleibende Basis mehr: es wird auf "pass" gesetzt, damit ein
-    reines Halluzinations-Review den Gate nicht blockiert (kein Verschwenden
-    einer Revision). Bleiben echte Findings übrig, bleibt das Verdict
-    unangetastet (fail-closed).
-    """
-    if not isinstance(review, dict):
-        return review  # type: ignore[return-value]
-    findings = review.get("findings")
-    if not isinstance(findings, list):
-        return review  # type: ignore[return-value]
-    filtered = [f for f in findings if not _finding_touches_deterministic_sections(f)]
-    if len(filtered) == len(findings):
-        return review  # type: ignore[return-value]
-    result = {**review, "findings": filtered}
-    if not filtered:
-        result["overall_verdict"] = "pass"
-    return result
-
 # Dry-Run-Platzhalter statt Fehlerstring: explizit als Dry-Run markiert,
 # damit kein Fehlertext als Briefing durch die Pipeline laeuft. Sektionen
-# entsprechen exakt dem kurzen Output-Contract (verify.SHORT_SECTIONS).
+# entsprechen exakt dem 1-Call-Contract (verify.DRAFT_SECTIONS).
 def _dry_run_placeholder(facts_package: dict | None) -> str:
     """Dry-Run-Platzhalter statt Fehlerstring: explizit als Dry-Run markiert,
     damit kein Fehlertext als Briefing durch die Pipeline laeuft. Sektionen
-    entsprechen exakt dem kurzen Output-Contract (Phase 5, verify.SHORT_SECTIONS).
-    Die Signal-Sektionen uebernehmen die deterministischen Signale aus dem
-    Faktenpaket (final_briefing-Renderer), damit verify auch im Dry-Run
-    konsistent bleibt. Der Fundamentaldaten-Disclaimer ist hart verankert.
+    entsprechen exakt dem 1-Call-Contract (verify.DRAFT_SECTIONS) inkl.
+    Pflicht-Empfehlung (## Empfehlung, deterministisches Label aus dem
+    Faktenpaket) und der Pflicht-Signalsektionen. Der Fundamentaldaten-
+    Disclaimer ist hart verankert.
     """
     label = "WATCH"
     reason = "Dry-Run, keine deterministische Bewertung."
@@ -193,14 +64,14 @@ def _dry_run_placeholder(facts_package: dict | None) -> str:
         if isinstance(rec, dict) and rec.get("label") in ("BUY", "SELL", "WATCH"):
             label = rec["label"]
             reason = f"Dry-Run — deterministisches Label: {rec.get('reason', label)}."
-    try:
-        summary = facts_package.get("deterministic_summary", {}) if facts_package is not None else {}
-        sell_section = final_briefing._section_sell_reduce_signals(summary)
-        watch_section = final_briefing._section_watchlist_signals(summary)
-        next_section = final_briefing._section_naechster_schritt(summary)
-    except Exception:
-        sell_section = "Keine Sell-/Reduce-Signale.\n\n" + final_briefing.FUNDAMENTALS_DISCLAIMER
-        watch_section = "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n\n" + final_briefing.FUNDAMENTALS_DISCLAIMER
+    sell_section = "Keine Sell-/Reduce-Signale.\n\nFundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar"
+    watch_section = "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n\nFundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar"
+    if (
+        facts_package is not None
+        and verify._naechster_schritt_handlungsbedarf(facts_package)
+    ):
+        next_section = "Handlungsbedarf: nächste Schritte gemäß Empfehlung umsetzen — Details siehe Empfehlung."
+    else:
         next_section = "Nächste Woche neuer Lauf, keine Aktion erforderlich."
     return (
         "## Kurzlage\n"
@@ -211,6 +82,8 @@ def _dry_run_placeholder(facts_package: dict | None) -> str:
         f"{sell_section}\n\n"
         "## Watchlist-Signale\n"
         f"{watch_section}\n\n"
+        "## Empfehlung\n"
+        f"{label} — {reason}\n\n"
         "## Nächster Schritt\n"
         f"{next_section}"
     )
@@ -366,41 +239,28 @@ def run(mode: str, dry_run: bool = False) -> int:
                 _alert(f"facts failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 2: deterministische Quelle (kein LLM-Draft mehr). Der
-        # deterministische Render (final_briefing.render_final_briefing) ist
-        # die einzige fachliche Quelle (Fakten/Zahlen/Sektionen/Labels); der
-        # LLM-Draft-Pfad (llm_briefing.generate_draft) ist abgeloest. Im
-        # Dry-Run bleibt der Platzhalter _dry_run_placeholder (kein Render,
-        # kein LLM-Call).
+        # Stufe 2: EIN LLM-Call (1-Call-Architektur, Plan 1-Call-Briefing) —
+        # llm_briefing.generate_draft (deepseek-v4-flash) ist die einzige
+        # fachliche Quelle: es baut das Layman-Briefing NUR aus dem
+        # Faktenpaket (Zahlen/Labels/Signale 1:1, Sektions-Contract). Der
+        # Dry-Run bleibt netzwerkfrei: Platzhalter _dry_run_placeholder
+        # (kein LLM-Call). Fail-closed: kein Fallback auf einen
+        # deterministischen Render (final_briefing ist entfernt).
         try:
             if dry_run:
                 draft = _dry_run_placeholder(facts_package)
             else:
-                draft = final_briefing.render_final_briefing(facts_package, mode=mode)
-                logging.info("deterministic briefing rendered (Quelle)")
+                draft = llm_briefing.generate_draft(facts_package, mode=mode)
+                logging.info("briefing draft generated (1 LLM-Call)")
+        except llm_briefing.LLMError as e:
+            _alert(f"draft failed (fail-closed): {e}\n{traceback.format_exc()}")
+            return 1
         except Exception as e:
-            _alert(f"final render failed: {e}\n{traceback.format_exc()}")
+            _alert(f"draft failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 2b: Humanizer (P1-P3) — LLM schreibt ausschliesslich die
-        # Sprache des deterministischen Briefings um (Fakten/Sektionen/
-        # Zahlen/Labels bleiben unveraendert, llm_humanize validiert das).
-        # Fail-closed: bei Humanizer-Fehler wird NICHT auf die
-        # deterministische Rohfassung zurueckgefallen (kein Fallback,
-        # User-Vorgabe) — nur Alert + Diagnose, kein Versand, keine
-        # Vault-Datei. Dry-Run ueberspringt den Humanizer unveraendert.
-        if not dry_run:
-            try:
-                draft = llm_humanize.humanize_briefing(draft, mode=mode)
-                logging.info("briefing humanized")
-            except llm_humanize.LLMError as e:
-                _alert(f"humanize failed (fail-closed, kein Fallback): {e}\n{traceback.format_exc()}")
-                return 1
-            except Exception as e:
-                _alert(f"humanize failed: {e}\n{traceback.format_exc()}")
-                return 1
-
-        # Stufe 3: deterministische Draft-Verifikation
+        # Stufe 3: deterministische Draft-Verifikation (1:1 gegen das
+        # Faktenpaket: Zahlen, Ticker/ISIN, News, Sektionen, Empfehlungs-Label).
         verification: list[dict] = []
         try:
             verification = verify.verify_draft(facts_package, draft)
@@ -414,122 +274,14 @@ def run(mode: str, dry_run: bool = False) -> int:
             _alert(f"verify failed: {e}\n{traceback.format_exc()}")
             return 1
 
-        # Stufe 4/5: LLM-Review + bedingter Revision-Loop (max MAX_REVISIONS).
-        # pass -> unveraendert zum final_gate; revise (ohne kritische Findings) ->
-        # deepseek-v4-flash-Revision -> verify_draft erneut -> erneutes Review.
-        # block/kritisch/MAX erreicht/ungueltig -> final_gate entscheidet fail-closed.
-        #
-        # GLM-Review-Kontrakt (config/prompts/review.txt): die deterministisch
-        # gerenderten Sektionen sind KEIN Review-Bereich für Faktenbehauptungen.
-        # Liefert GLM trotzdem klar halluzinierte Findings zu diesen Sektionen/
-        # Fakten, filtert der Orchestrator genau diese aus — andere echte
-        # Review-Findings bleiben fail-closed blockierend.
-        if dry_run:
-            review = {"findings": [], "overall_verdict": "pass"}
-        else:
-            revision_count = 0
-            while True:
-                try:
-                    review = llm_review.review_draft(facts_package, draft)
-                    logging.info("review completed")
-                except llm_review.LLMError as e:
-                    _alert(f"review failed (fail-closed): {e}\n{traceback.format_exc()}")
-                    return 1
-                except Exception as e:
-                    _alert(f"review failed: {e}\n{traceback.format_exc()}")
-                    return 1
-
-                review = _filter_review_findings(review)
-                if (
-                    not isinstance(review, dict)
-                    or not isinstance(review.get("findings"), list)
-                    or "overall_verdict" not in review
-                ):
-                    # Defensiv: ungueltiges Review nach Filterung fail-closed behandeln.
-                    review = {"findings": [], "overall_verdict": "block"}
-                if review.get("findings"):
-                    kept = [f["issue"] for f in review["findings"]]
-                    logging.warning(f"review findings nach Filterung: {kept}")
-
-                verdict = review.get("overall_verdict")
-                has_critical = any(
-                    f.get("severity") == "critical" for f in review.get("findings", [])
-                )
-
-                if verdict == "pass":
-                    break  # unveraendert weiter zum final_gate
-
-                if verdict == "revise" and not has_critical and revision_count < MAX_REVISIONS:
-                    try:
-                        draft = llm_revise.revise_draft(facts_package, draft, review)
-                    except llm_revise.LLMError as e:
-                        _alert(f"revise failed (fail-closed): {e}\n{traceback.format_exc()}")
-                        return 1
-                    except Exception as e:
-                        _alert(f"revise failed: {e}\n{traceback.format_exc()}")
-                        return 1
-                    revision_count += 1
-                    logging.info(f"revise completed ({revision_count}/{MAX_REVISIONS})")
-                    # Stufe 2 + 2b erneut: nach jeder Revision wird der Draft
-                    # erneut deterministisch gerendert und anschliessend
-                    # gehumanisiert — verify und Review pruefen immer den
-                    # (gehumanisierten) Text, nie den rohen Revise-Output.
-                    # Render- und Humanizer-Fehler sind fail-closed (kein
-                    # Fallback auf die Rohfassung).
-                    try:
-                        draft = final_briefing.render_final_briefing(facts_package, mode=mode)
-                        logging.info("final briefing re-rendered after revision (Quelle)")
-                    except Exception as e:
-                        _alert(f"final render failed: {e}\n{traceback.format_exc()}")
-                        return 1
-                    try:
-                        draft = llm_humanize.humanize_briefing(draft, mode=mode)
-                        logging.info("briefing re-humanized after revision")
-                    except llm_humanize.LLMError as e:
-                        _alert(f"humanize failed (fail-closed, kein Fallback): {e}\n{traceback.format_exc()}")
-                        return 1
-                    except Exception as e:
-                        _alert(f"humanize failed: {e}\n{traceback.format_exc()}")
-                        return 1
-                    # Stufe 3 erneut: revidierten Draft deterministisch verifizieren
-                    try:
-                        verification = verify.verify_draft(facts_package, draft)
-                        if verification:
-                            logging.warning(f"verify_draft findings (nach Revision): {[f['issue'] for f in verification]}")
-                    except llm_briefing.LLMError as e:
-                        _alert(f"verify failed (fail-closed): {e}\n{traceback.format_exc()}")
-                        return 1
-                    except Exception as e:
-                        _alert(f"verify failed: {e}\n{traceback.format_exc()}")
-                        return 1
-                    continue  # revidierten Draft erneut reviewen (bounded durch MAX_REVISIONS)
-
-                # block / kritische Findings / MAX_REVISIONS erreicht: final_gate blockt.
-                break
-
-        # Stufe 6: Versand-Gate (nach evtl. Revision entscheidet final_gate)
-        gate = verify.final_gate(verification, review)
+        # Stufe 4: Versand-Gate (verification-only, fail-closed bei
+        # critical/major-Findings; info/minor blocken nie).
+        gate = verify.final_gate(verification)
         if not gate.allow_send:
             # Kein traceback.format_exc(): hier ist kein Exception-Kontext aktiv.
             _alert(f"Briefing blockiert (final_gate): {gate.reason}")
             return 1
         logging.info(f"final_gate: {gate.reason}")
-
-        # Stufe 6b: deterministischer Verify-Status-Absatz (P4) — rein
-        # darstellend (Counts + Verdict + Gate-Reason, keine Fakten). Wird
-        # NACH final_gate PASS als LETZTER Absatz an den (gehumanisierten)
-        # Text angehaengt und laeuft NICHT durch den Humanizer (deterministisch,
-        # kein LLM-Call). Kein Re-Verify noetig: der Absatz enthaelt keine
-        # Fakten/Zahlen/ISIN/Labels, die verify_draft pruefen wuerde.
-        try:
-            verify_paragraph = final_briefing.render_verify_paragraph(
-                verification, review, gate.reason
-            )
-            draft = f"{draft}\n\n{verify_paragraph}"
-            logging.info("verify paragraph appended")
-        except Exception as e:
-            _alert(f"verify paragraph failed: {e}\n{traceback.format_exc()}")
-            return 1
 
         date = datetime.now().strftime("%Y-%m-%d")
         try:
