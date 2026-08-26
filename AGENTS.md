@@ -2,22 +2,28 @@
 
 ## Projektbeschreibung
 
-Wöchentliche/monatliche Portfolio-Briefings per RSS-Filter, LLM-Generierung mit Review-Gate und Telegram-Alert.
+Wöchentliche/monatliche Portfolio-Briefings per RSS-Filter, 1-LLM-Call-Generierung mit verify-Gate und Telegram-Alert.
 
-## Pipeline (Phase 4)
+## Pipeline (Phase 4 — 1-LLM-Call-Architektur)
 
 ```
-deterministic first → DeepSeek Draft → Python verify → GLM Review → (optionale 1× DeepSeek-Revision) → final gate → Telegram/Vault
+deterministic first → 1 LLM-Call (generate_draft) → Python verify → final_gate (verification-only, fail-closed) → Telegram/Vault
 ```
 
 - **Deterministic first:** `sc_bridge` → `analyze` → `filter_news` → `facts.build_facts_package` (inkl. `deterministic_summary`, der einzigen erlaubten Zahlenquelle).
 - **Live-First-Daten:** produktiver Lauf via `snapshot.load_previous()` → `sc_bridge.refresh_from_sc()` (fail-closed, kein Mock) → `snapshot.capture()` → `diff.diff_snapshots()`; Persistenz nur über das Snapshot-Modul (`config/snapshot.current.json` + `config/snapshots/archive/`), kein `update_config`. Mock (`load_mock()`) nur im Dry-Run.
-- **DeepSeek Draft:** `llm_briefing.generate_draft` (`deepseek-v4-flash`), feste Sektionen (Kurzlage, Datenqualität, Entscheidungsrelevante Punkte, Strategie-Abgleich, Relevante News & Veränderungen) + abschließende `## Empfehlung` (BUY/SELL/WATCH, Label 1:1 aus `deterministic_summary.recommendation`).
-- **Python verify:** `verify.verify_draft` — alle Sektionen, Zahlen (vs. deterministic_summary, 1:1), Ticker/ISIN (vs. Portfolio), News-Referenz, Ampeln (7 Kategorien) + Empfehlungs-Label + Positionsvorschläge (max. 3) + Neukaufideen (max. 2, ≥2 unabhängige Quellen) 1:1; erkennt LLM-Fehlerstrings.
-- **GLM Review:** `llm_review.review_draft` (`glm-5.2`), striktes JSON (findings + overall_verdict pass|revise|block).
-- **Optionale 1× DeepSeek-Revision:** `llm_revise.revise_draft` nur bei `revise` und ausschließlich nicht-kritischen Findings; max 1 Revision (`MAX_REVISIONS`), danach erneutes verify + Review.
-- **Final gate:** `verify.final_gate` — blockt bei critical/major (verify ODER review), `block`, `revise` nach max Revision, fehlendem/ungültigem Verdict. minor/info blocken nie.
+- **1 LLM-Call:** `llm_briefing.generate_draft` (`deepseek-v4-flash` via NeuralWatt, Prompt `config/prompts/briefing.txt`) — Layman-Briefing NUR aus dem Faktenpaket. Keine Humanize-/Review-/Revise-Stufe.
+- **Sektions-Contract (bindend für Prompt UND verify, 6 Pflichtsektionen in dieser Reihenfolge):**
+  1. `## Kurzlage` — Was ist passiert? (Ampeln + Top-Befunde erklärt)
+  2. `## Datenqualität` — Datenlage und was sie bedeutet
+  3. `## Sell-/Reduce-Signale (bestehende Satellites)` — unverändert aus Signalen
+  4. `## Watchlist-Signale` — unverändert aus Signalen
+  5. `## Empfehlung` — BUY/SELL/WATCH-Label 1:1 aus `deterministic_summary.recommendation` + Begründung/Counterargument aus den Signal-Dimensionen (keine neuen Fakten)
+  6. `## Nächster Schritt` — konkreter Handlungshinweis aus den Signalen
+- **Python verify:** `verify.verify_draft` — Sektions-Contract, Zahlen (vs. deterministic_summary, 1:1), Ticker/ISIN (vs. Portfolio), News-Referenz, Ampeln (7 Kategorien) + Empfehlungs-Label (1:1 aus `deterministic_summary.recommendation`) + Positionsvorschläge (max. 3) + Neukaufideen (max. 2, ≥2 unabhängige Quellen); erkennt LLM-Fehlerstrings. Prosa bleibt frei — verify prüft Label/Zahlen 1:1, nicht Formulierung.
+- **Final gate:** `verify.final_gate` — verification-only: blockt bei critical/major. minor/info blocken nie.
 - **Versand:** `render_markdown` (Vault, status `active`) + `send_telegram` (mode `alert` archiviert nie).
+- **`q4_tax_context.txt`:** bleibt — wird im Zeitraum Okt–Dez an `briefing.txt` angehängt (bestehender `_load_prompt`-Mechanismus).
 
 ## Setup
 
@@ -71,7 +77,7 @@ Jeder Fehler → kein Versand, keine Vault-Briefing-Datei, nur kurzer Alert (Tel
 
 In `~/.config/automation/config.env`:
 
-- `NEURALWATT_API_KEY` — für alle LLM-Calls (Draft `deepseek-v4-flash`, Review `glm-5.2`, Revise `deepseek-v4-flash` via NeuralWatt)
+- `NEURALWATT_API_KEY` — für den einzigen LLM-Call (`generate_draft`, `deepseek-v4-flash` via NeuralWatt)
 - `TELEGRAM_TOKEN` — Bot-Token für Alerts
 - `TELEGRAM_CHAT_ID` — Ziel-Chat für Alerts
 
