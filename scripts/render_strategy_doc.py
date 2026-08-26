@@ -32,6 +32,18 @@ _SECTOR_LABELS = {
     "defense": "Rüstung",
 }
 
+# Doku-Lesart der Klassifikations-Kategorien (Fachwerte bleiben unverändert).
+_CATEGORY_LABELS = {
+    "core": "Core",
+    "satellite": "Satellite",
+    "legacy": "Legacy",
+    "unknown": "Unknown",
+}
+
+_NO_CLASSIFICATION_HINT = (
+    "Keine Klassifikation hinterlegt (Fallback auf etf_lookup + Live-Daten)."
+)
+
 
 def _load_yaml(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
@@ -178,6 +190,34 @@ def render_strategy_doc() -> str:
         "keine „sinnvollen Mappings“ — fehlende/unklare analyserelevante Antworten "
         "blockieren den Setup hart."
     )
+    lines.append("")
+    lines.append("## 6. Holdings-Klassifikation")
+    lines.append("")
+    classification = strategy.get("holdings_classification", {})
+    isins = classification.get("isins", {}) if isinstance(classification, dict) else {}
+    if not isinstance(isins, dict) or not isins:
+        lines.append(f"_{_NO_CLASSIFICATION_HINT}_")
+    else:
+        lines.append("| ISIN | Name | Kategorie | Bestätigt | Quelle |")
+        lines.append("|---|---|---|---|---|")
+        lookup = analyze.load_etf_lookup()
+        for isin, entry in sorted(isins.items()):
+            if not isinstance(entry, dict):
+                continue
+            name = ""
+            if isinstance(lookup.get(isin), dict):
+                name = str(lookup.get(isin, {}).get("name") or "")
+            lines.append(
+                f"| {isin} | {name or '—'} | "
+                f"{_CATEGORY_LABELS.get(str(entry.get('category')), str(entry.get('category') or '—'))} | "
+                f"{_fmt(entry.get('confirmed'))} | {_fmt(entry.get('source'))} |"
+            )
+        lines.append("")
+        lines.append(
+            "Nur in `strategy.yaml` hinterlegte Klassifikationen (Strategie-Intent) "
+            "erscheinen hier; nicht klassifizierte Holdings gelten zur Laufzeit als "
+            "`unknown` (Fallback-Kette: Rohdaten-Kategorie → etf_lookup → unknown)."
+        )
     return "\n".join(lines)
 
 

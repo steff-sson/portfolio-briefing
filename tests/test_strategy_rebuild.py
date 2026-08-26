@@ -961,6 +961,46 @@ def test_render_strategy_doc_values_match_strategy(monkeypatch, tmp_path):
     assert "SUSE" in doc  # Abgrenzung
 
 
+def _render_doc(monkeypatch, tmp_path, strategy: dict) -> str:
+    """Strategie-Fixture rendern (Antworten neutral, keine persönlichen Daten)."""
+    from scripts import render_strategy_doc
+
+    strategy_path = tmp_path / "strategy.yaml"
+    strategy_path.write_text(
+        yaml.safe_dump(strategy, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    answers_path = tmp_path / "answers.reviewed.yaml"
+    answers_path.write_text(
+        yaml.safe_dump({"answers": {}}, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    monkeypatch.setattr(render_strategy_doc, "STRATEGY_PATH", strategy_path)
+    monkeypatch.setattr(render_strategy_doc, "ANSWERS_REVIEWED_PATH", answers_path)
+    return render_strategy_doc.render_strategy_doc()
+
+
+def test_render_strategy_doc_classification_table(monkeypatch, tmp_path):
+    """P4: Klassifikationstabelle rendert ISIN, Name, Kategorie, Bestätigt, Quelle."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True, "source": "user"},
+        "LU2722255754": {"category": "legacy", "confirmed": True, "source": "user"},
+    })
+    doc = _render_doc(monkeypatch, tmp_path, strategy)
+    assert "## 6. Holdings-Klassifikation" in doc
+    assert "| ISIN | Name | Kategorie | Bestätigt | Quelle |" in doc
+    # ISIN mit Name aus etf_lookup (Doku-Lesart, keine Fachwerte).
+    assert "| IE00BK5BQT80 | Vanguard FTSE All-World UCITS ETF | Core | ja | user |" in doc
+    # SUSE: Name fehlt in etf_lookup -> "—"; Kategorie-Label "Legacy".
+    assert "| LU2722255754 | — | Legacy | ja | user |" in doc
+
+
+def test_render_strategy_doc_classification_missing_hint(monkeypatch, tmp_path):
+    """P4: fehlender holdings_classification-Block -> klarer Hinweis, keine Tabelle."""
+    doc = _render_doc(monkeypatch, tmp_path, FULL_STRATEGY)
+    assert "## 6. Holdings-Klassifikation" in doc
+    assert "Keine Klassifikation hinterlegt (Fallback auf etf_lookup + Live-Daten)." in doc
+    assert "| ISIN | Name | Kategorie |" not in doc
+
+
 def test_strategy_hash_version_consistency():
     strategy = json.loads(json.dumps(FULL_STRATEGY))
     h1 = analyze.strategy_hash(strategy)
