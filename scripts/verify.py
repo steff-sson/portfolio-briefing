@@ -469,7 +469,45 @@ def _extract_numbers(text: str) -> list[float]:
     return [float(m.replace(",", ".")) for m in matches]
 
 
-def _extract_tickers(text: str) -> set[str]:
+def _facts_name_words(facts_package: dict | None) -> set[str]:
+    """Wörter aus Holding-/Signal-Namen des Faktenpakets (deterministischer
+    Paket-Ausschluss für den Ticker-Check).
+
+    Quellen: portfolio.holdings[].name plus die Signal-Namen/-Ticker aus
+    deterministic_summary (satellite_sell_signals, watchlist_signals,
+    position_actions — Felder "name"/"ticker", falls vorhanden). Split an
+    Nicht-Buchstaben, lowercase normalisiert. Kandidaten-Tokens, die
+    case-insensitive Teilwort eines dieser Wörter sind (z.B. "AC" ⊂ "acc"),
+    sind Namensbestandteile — keine erfundenen Ticker. Kein Paket (None)
+    ergibt eine leere Menge (Ausschluss greift dann nur nicht).
+    """
+    words: set[str] = set()
+    if not isinstance(facts_package, dict):
+        return words
+    sources: list = []
+    portfolio = facts_package.get("portfolio")
+    if isinstance(portfolio, dict):
+        holdings = portfolio.get("holdings")
+        if isinstance(holdings, list):
+            sources.extend(holdings)
+    summary = facts_package.get("deterministic_summary")
+    if isinstance(summary, dict):
+        for key in ("satellite_sell_signals", "watchlist_signals", "position_actions"):
+            items = summary.get(key)
+            if isinstance(items, list):
+                sources.extend(items)
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        for field in ("name", "ticker"):
+            value = item.get(field)
+            if not value:
+                continue
+            words.update(word.lower() for word in re.findall(r"[A-Za-z]{2,}", str(value)))
+    return words
+
+
+def _extract_tickers(text: str, facts_package: dict | None = None) -> set[str]:
     common = {
         "LLM", "API", "HTTP", "USD", "EUR", "ETF", "MVP", "RSS", "Q4", "AI", "OK",
         "USA", "IPO", "CEO", "GDP", "CPI", "EPS", "NASDAQ", "NYSE", "CNBC", "DAX",
@@ -493,9 +531,22 @@ def _extract_tickers(text: str) -> set[str]:
         # vorkommen können — keine Ticker (Live-Fix: "KI-Thema" löste sonst
         # "Ticker/ISIN KI nicht im Portfolio" aus).
         "KI", "USA", "EU", "ESG", "RSS", "API",
+        # ETF-Anteilsklasse (Acc): "ACC" ist gerenderter Namensbestandteil
+        # von ETF-Holdings ("iShares MSCI World (Acc)"), kein Ticker — das
+        # LLM schreibt sie auch als "(ACC)". Zusätzlich greift der Paket-
+        # Ausschluss über _facts_name_words ("AC" ⊂ "acc").
+        "ACC",
     }
     candidates = set(re.findall(r"\b[A-Z]{2,5}(?:[-\.]?[A-Z]+)?\b", text))
-    return candidates - common
+    candidates -= common
+    name_words = _facts_name_words(facts_package)
+    if name_words:
+        candidates = {
+            token
+            for token in candidates
+            if not any(token.lower() in word for word in name_words)
+        }
+    return candidates
 
 
 def _extract_isins(text: str) -> set[str]:
@@ -898,7 +949,7 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     news_words = set()
     for title in news_titles:
         news_words.update(word.upper() for word in re.findall(r"[A-Za-z]{2,}", title))
-    for ticker in _extract_tickers(text):
+    for ticker in _extract_tickers(text, facts_package):
         if ticker in news_words or ticker in holding_name_words:
             continue  # Teil eines referenzierten News-Titels oder echten Holdingnamens
         if ticker not in portfolio_tickers and ticker not in portfolio_isins:
@@ -1058,7 +1109,7 @@ def verify_briefing(
             break
 
     # 2. Ticker/ISIN existence
-    mentioned_tickers = _extract_tickers(text)
+    mentioned_tickers = _extract_tickers(text, facts_package={"portfolio": portfolio})
     mentioned_isins = _extract_isins(text)
     portfolio_tickers = set()
     portfolio_isins = set()

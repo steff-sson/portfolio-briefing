@@ -367,6 +367,41 @@ class TestVerifyDraft:
         findings = verify.verify_draft(facts, draft)
         assert any(f["severity"] == "major" and "MSFT" in f["issue"] for f in findings)
 
+    def test_acc_share_class_not_flagged_as_ticker(self):
+        """Regression (Live-Fix): ETF-Anteilsklasse '(Acc)' im Holdingnamen —
+        das LLM schreibt sie auch als '(ACC)'. 'AC'/'ACC' sind Namens-
+        bestandteile (case-insensitive Teilwort von 'acc'), kein Ticker —
+        der Draft loest KEIN Ticker-Finding aus (Paket-Ausschluss)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "IE00BK5BQT80", "name": "iShares MSCI World (Acc)"},
+                {"ticker": "AAPL", "isin": "US0378331005", "name": "Apple Inc."},
+            ]
+        }
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Der iShares MSCI World (ACC) (IE00BK5BQT80) ist die groesste Core-Position.",
+        )
+        assert verify.verify_draft(facts, draft) == []
+
+    def test_acc_blocklist_keeps_working_without_facts_package(self):
+        """'ACC' steht zusaetzlich in der common-Blocklist — auch ohne
+        Faktenpaket (None) loest es kein Ticker-Finding aus (None-tolerant).
+        'AC' (ohne Paket nicht abgedeckt, da nur Blocklist-Eintrag 'ACC')
+        wird erst ueber den Paket-Ausschluss (_facts_name_words) gefiltert."""
+        assert "ACC" not in verify._extract_tickers("iShares MSCI World (ACC)", None)
+        # 'AC' ist Kandidat ohne Paket — der Paket-Ausschluss braucht das Paket.
+        assert "AC" in verify._extract_tickers("iShares MSCI World (AC)", None)
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "IE00BK5BQT80", "name": "iShares MSCI World (Acc)"},
+            ]
+        }
+        # Mit Paket filtert der Teilwort-Ausschluss 'AC' ⊂ 'acc'.
+        assert "AC" not in verify._extract_tickers("iShares MSCI World (AC)", facts)
+
     def test_holding_name_tokens_require_portfolio_isin(self):
         """Fail-closed: Ein Token ohne zugehoerige Portfolio-ISIN (Holding fehlt
         im Portfolio) bleibt major — die Allowlist greift nur für echte Bestände.
