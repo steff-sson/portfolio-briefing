@@ -409,3 +409,45 @@ def test_corrupt_offset_logs_no_token(monkeypatch, tmp_path, caplog):
     assert requests_seen, "getUpdates-Request muss gesendet worden sein"
     assert "offset" not in requests_seen[0].url.params
     assert FAKE_TOKEN not in caplog.text
+
+
+# --- P7: kein Usertext/keine Secrets in Logs (untrusted offene Punkte) --------
+
+
+def test_open_points_content_never_logged_by_pipeline(caplog, monkeypatch, tmp_path):
+    """Untrusted User-Text offener Punkte erscheint nie in normalen Logs —
+    auch nicht via verify-Findings oder Fehlerpfaden."""
+    from scripts import run_briefing
+
+    _patch_env(monkeypatch, tmp_path)
+    caplog.set_level(logging.DEBUG)
+
+    secret_text = "GEHEIMER-PUNKT-TOKEN-42"
+    point = {
+        "message_id": 99,
+        "chat_id": FAKE_CHAT_ID,
+        "text": secret_text,
+        "received_at": "2026-08-26T14:30:00+00:00",
+        "status": "open",
+        "briefing_date": None,
+    }
+    telegram_inbound.persist_open_point(point)
+    loaded = telegram_inbound.load_open_points()
+    assert loaded[0]["text"] == secret_text  # Persistenz funktioniert
+
+    # verify-Findings enthalten keinen User-Text (nur generische Beschreibung).
+    from scripts import verify
+
+    facts_package = {
+        "open_points": [{"text": secret_text, "untrusted": True}],
+        "deterministic_summary": {},
+    }
+    findings = verify.verify_draft(
+        facts_package,
+        "## Kurzlage\nOK\n\n## Datenqualität\n—\n\n"
+        "## Sell-/Reduce-Signale (bestehende Satellites)\nKeine.\n\n"
+        "## Watchlist-Signale\nKeine.\n\n## Empfehlung\nWATCH\n\n## Nächster Schritt\nKeine Aktion.",
+    )
+    for finding in findings:
+        assert secret_text not in str(finding)
+    assert secret_text not in caplog.text

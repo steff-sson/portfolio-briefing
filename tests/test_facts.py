@@ -38,7 +38,7 @@ def test_full_package_from_mock_data(portfolio, transactions):
     assert set(package) == {
         "meta", "portfolio", "analysis", "news", "strategy", "transactions", "changes",
         "data_quality", "strategy_diff", "triggers", "watchlist",
-        "deterministic_summary", "strategy_thresholds_pct",
+        "deterministic_summary", "strategy_thresholds_pct", "open_points",
     }
     assert set(package["meta"]) == {"mode", "generated_at", "pipeline_version"}
     assert package["meta"]["mode"] == "monday"
@@ -696,3 +696,115 @@ def test_signal_json_serializable_and_deterministic():
     assert summary_a["satellite_sell_signals"] == summary_b["satellite_sell_signals"]
     assert all(s.get("fundamentals_used") is False for s in summary_a["watchlist_signals"])
     assert all(s.get("fundamentals_used") is False for s in summary_a["satellite_sell_signals"])
+
+
+# --- P7: offene Punkte als untrusted Kontext ----------------------------------
+#
+# facts.build_facts_package(open_points=...) reduziert die offenen Punkte
+# (telegram_inbound.load_open_points) auf {text, received_at} mit
+# `untrusted: true` und begrenzt sie deterministisch (MAX_OPEN_POINTS,
+# MAX_OPEN_POINT_CHARS). Ohne Argument bleibt das Paket strukturell
+# unveraendert (rueckwaertskompatibel).
+
+def _open_point(message_id: int, text: str, received_at: str = "2026-08-26T14:30:00+00:00") -> dict:
+    return {
+        "message_id": message_id,
+        "chat_id": "-1001234567890",
+        "text": text,
+        "received_at": received_at,
+        "status": "open",
+        "briefing_date": None,
+    }
+
+
+def test_open_points_default_is_empty_and_backward_compatible(portfolio, transactions):
+    """Ohne open_points-Argument: Paket enthaelt leere Liste (deterministisch),
+    sonst strukturell unveraendert — bestehende Aufrufer bleiben unveraendert."""
+    package = facts.build_facts_package(portfolio, transactions, {}, news=[], strategy={}, mode="monday")
+    assert package["open_points"] == []
+    json.dumps(package)  # JSON-serialisierbar
+
+
+def test_open_points_land_marked_and_reduced(portfolio, transactions):
+    """Offene Punkte landen als {text, received_at} mit untrusted: true im
+    Paket; message_id/chat_id/status/briefing_date werden reduziert."""
+    open_points = [
+        _open_point(1, "SUSE endlich bewerten lassen!"),
+        _open_point(2, "Sektorlimit anpassen?"),
+    ]
+    package = facts.build_facts_package(
+        portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=open_points
+    )
+    assert package["open_points"] == [
+        {"text": "SUSE endlich bewerten lassen!", "received_at": "2026-08-26T14:30:00+00:00", "untrusted": True},
+        {"text": "Sektorlimit anpassen?", "received_at": "2026-08-26T14:30:00+00:00", "untrusted": True},
+    ]
+    # Reduktion: keine Persistenz-/Chat-Felder im Paket
+    for entry in package["open_points"]:
+        assert "message_id" not in entry
+        assert "chat_id" not in entry
+        assert "status" not in entry
+        assert "briefing_date" not in entry
+    json.dumps(package)  # JSON-serialisierbar
+    # Input nicht mutiert
+    assert open_points[0]["status"] == "open"
+
+
+def test_open_points_not_in_deterministic_summary(portfolio, transactions):
+    """Offene Punkte sind KEINE deterministischen Fakten: sie erscheinen
+    nicht in deterministic_summary und veraendern summary nicht."""
+    base = facts.build_facts_package(portfolio, transactions, {}, news=[], strategy={}, mode="monday")
+    with_points = facts.build_facts_package(
+        portfolio,
+        transactions,
+        {},
+        news=[],
+        strategy={},
+        mode="monday",
+        open_points=[_open_point(1, "Sektorlimit anpassen?")],
+    )
+    assert base["deterministic_summary"] == with_points["deterministic_summary"]
+    assert "open_points" not in with_points["deterministic_summary"]
+
+
+def test_open_points_truncated_and_capped(portfolio, transactions):
+    """Deterministische Begrenzung: max. MAX_OPEN_POINTS Punkte, jeder Text
+    auf MAX_OPEN_POINT_CHARS Zeichen gekuerzt; Persistenzdatei nie mutiert."""
+    long_text = "x" * (facts.MAX_OPEN_POINT_CHARS + 100)
+    many = [_open_point(i, long_text) for i in range(1, facts.MAX_OPEN_POINTS + 5)]
+    package = facts.build_facts_package(
+        portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=many
+    )
+    assert len(package["open_points"]) == facts.MAX_OPEN_POINTS
+    for entry in package["open_points"]:
+        assert len(entry["text"]) == facts.MAX_OPEN_POINT_CHARS
+    # Originalliste unangetastet (Persistenz/Paket-Input nie mutiert)
+    assert len(many) == facts.MAX_OPEN_POINTS + 4
+    assert len(many[0]["text"]) == len(long_text)
+    # Deterministisch: identische Eingabe -> identische Begrenzung
+    again = facts.build_facts_package(
+        portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=many
+    )
+    assert package["open_points"] == again["open_points"]
+
+
+def test_open_points_skips_invalid_entries(portfolio, transactions):
+    """Nicht-dict/leere Eintraege werden uebersprungen; None -> leere Liste."""
+    open_points = [
+        None,
+        "nur-ein-string",
+        {"message_id": 3, "text": "", "received_at": "x"},  # leerer Text
+        {"message_id": 4, "text": "gueltig", "received_at": "2026-08-26T00:00:00+00:00"},
+        {"message_id": 5, "text": "ohne received_at"},
+    ]
+    package = facts.build_facts_package(
+        portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=open_points
+    )
+    assert package["open_points"] == [
+        {"text": "gueltig", "received_at": "2026-08-26T00:00:00+00:00", "untrusted": True},
+        {"text": "ohne received_at", "untrusted": True},
+    ]
+    package_none = facts.build_facts_package(
+        portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=None
+    )
+    assert package_none["open_points"] == []

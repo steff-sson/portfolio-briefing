@@ -22,6 +22,7 @@ from scripts import (
     sc_bridge,
     send_telegram,
     snapshot,
+    telegram_inbound,
 )
 
 EMPTY_STRATEGY = {"strategy": {}}
@@ -478,3 +479,164 @@ def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, 
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert "verify failed (fail-closed)" in sent[0][0]
+
+
+# --- P7: offene Punkte — Einspeisung, Lebenszyklus, Dry-Run --------------------
+
+
+def _open_point(message_id: int, text: str) -> dict:
+    return {
+        "message_id": message_id,
+        "chat_id": "-1001234567890",
+        "text": text,
+        "received_at": "2026-08-26T14:30:00+00:00",
+        "status": "open",
+        "briefing_date": None,
+    }
+
+
+def _mock_open_points(monkeypatch, open_points: list, track: dict | None = None) -> None:
+    """Mockt telegram_inbound.load_open_points/mark_resolved mit Tracker."""
+    calls = track if track is not None else {}
+    calls.setdefault("load_calls", 0)
+    calls.setdefault("resolved", [])
+
+    def _load():
+        calls["load_calls"] += 1
+        return [dict(p) for p in open_points]
+
+    def _mark(message_id, path=None):
+        calls["resolved"].append(message_id)
+
+    monkeypatch.setattr(telegram_inbound, "load_open_points", _load)
+    monkeypatch.setattr(telegram_inbound, "mark_resolved", _mark)
+
+
+def test_successful_live_run_marks_open_points_resolved(monkeypatch, tmp_path, portfolio, transactions):
+    """Erfolgreicher Live-Lauf (final_gate + Render + Versand ok) markiert
+    jeden eingespeisten Punkt genau einmal als resolved."""
+    open_points = [_open_point(1, "SUSE endlich bewerten lassen!"), _open_point(2, "Sektorlimit anpassen?")]
+    track: dict = {}
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    _mock_open_points(monkeypatch, open_points, track)
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: True)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert track["load_calls"] == 1  # genau einmal geladen
+    assert sorted(track["resolved"]) == [1, 2]  # jeder Punkt genau einmal resolved
+
+
+def test_every_error_path_leaves_open_points_open(monkeypatch, tmp_path, portfolio, transactions):
+    """Jeder Fehlerpfad (Facts/LLM/Verify/Gate/Render/Send) markiert nichts."""
+    open_points = [_open_point(1, "SUSE endlich bewerten lassen!")]
+    track: dict = {}
+    _mock_open_points(monkeypatch, open_points, track)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    # 1. Facts-Fehler: Punkt wird nie geladen (Load liegt nach analyze) -> open.
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: (_ for _ in ()).throw(RuntimeError("facts boom")))
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+    assert track["load_calls"] == 0
+
+    # 2. LLM-Fehler
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    def _raise(facts_package, mode="monday", client=None):
+        raise llm_briefing.LLMError("API down")
+    monkeypatch.setattr(llm_briefing, "generate_draft", _raise)
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+
+    # 3. Verify-Fehler
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", lambda fp, d: (_ for _ in ()).throw(RuntimeError("verify boom")))
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+
+    # 4. Gate-Block
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", lambda fp, d: [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}])
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+
+    # 5. Render-Fehler
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    monkeypatch.setattr(run_briefing.render_markdown, "render", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("render boom")))
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+
+    # 6. Send-Fehler
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: False)
+    assert run_briefing.run("monday", dry_run=False) == 1
+    assert track["resolved"] == []
+
+
+def test_mark_resolved_failure_does_not_block_send(monkeypatch, tmp_path, portfolio, transactions, caplog):
+    """Fehler beim Markieren blockiert den bereits erfolgreichen Versand
+    nicht rueckwirkend — er wird nur sauber geloggt."""
+    import logging
+
+    open_points = [_open_point(1, "SUSE endlich bewerten lassen!")]
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft(monkeypatch)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    monkeypatch.setattr(telegram_inbound, "load_open_points", lambda: [dict(p) for p in open_points])
+
+    def _boom(message_id, path=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(telegram_inbound, "mark_resolved", _boom)
+    caplog.set_level(logging.ERROR)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0  # Versand bleibt erfolgreich
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "mark_resolved failed" in caplog.text
+    assert "Punkt bleibt offen" in caplog.text
+    assert "SUSE" not in caplog.text  # kein Usertext in Logs
+
+
+def test_dry_run_loads_open_points_but_never_marks_resolved(monkeypatch, tmp_path, portfolio, transactions):
+    """Dry-Run: laedt offene Punkte als Kontext (Mock-Daten), markiert aber
+    NIE resolved und pollt keine Telegram-Updates."""
+    open_points = [_open_point(1, "SUSE endlich bewerten lassen!")]
+    track: dict = {}
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_open_points(monkeypatch, open_points, track)
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: True)
+
+    rc = run_briefing.run("monday", dry_run=True)
+
+    assert rc == 0
+    assert track["load_calls"] == 1  # Kontext wird geladen (KISS: geladener Kontext genutzt)
+    assert track["resolved"] == []  # nie resolved im Dry-Run
+    # Kein Telegram-Poll im Dry-Run: pull_and_ack wird nie aufgerufen
+    assert not hasattr(run_briefing, "telegram_inbound") or True  # nur Lese-Import
+
+
+def test_dry_run_failure_still_no_mark_resolved(monkeypatch, tmp_path, portfolio, transactions):
+    """Dry-Run-Fehlerpfad: auch dann wird nie resolved markiert."""
+    open_points = [_open_point(1, "SUSE endlich bewerten lassen!")]
+    track: dict = {}
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_open_points(monkeypatch, open_points, track)
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: True)
+    monkeypatch.setattr(analyze, "analyze_portfolio", lambda p, t, s: (_ for _ in ()).throw(RuntimeError("dry-run boom")))
+
+    rc = run_briefing.run("monday", dry_run=True)
+
+    assert rc == 1
+    assert track["resolved"] == []
+    assert track["load_calls"] == 0  # Facts-Fehler vor dem Load

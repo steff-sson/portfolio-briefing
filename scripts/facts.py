@@ -14,6 +14,14 @@ from scripts import analyze
 
 PIPELINE_VERSION = "2.0"
 
+# Offene Punkte aus dem Telegram-Rückkanal (P7): deterministische Begrenzung
+# des untrusted Prompt-Kontexts. MAX_OPEN_POINTS begrenzt die Anzahl der
+# eingespeisten Punkte, MAX_OPEN_POINT_CHARS die Länge jedes Texts. Beim
+# Kürzen wird die Persistenzdatei (config/setup/open_points.json) NIE mutiert
+# — es entstehen nur neue, begrenzte Paket-Objekte (Input bleibt unverändert).
+MAX_OPEN_POINTS = 10
+MAX_OPEN_POINT_CHARS = 500
+
 # Reihenfolge der Checks mit Status-Feld, wie von analyze.analyze_portfolio erzeugt.
 _STATUS_CHECKS = [
     "core_satellite",
@@ -283,6 +291,37 @@ def compute_triggers(facts_package: dict) -> dict:
     }
 
 
+def _reduce_open_points(open_points: object) -> list[dict]:
+    """Reduziert offene Punkte auf den untrusted Text — begrenzt + markiert.
+
+    P7: Offene Punkte sind untrusted user input aus dem Telegram-Rückkanal.
+    Nur ``text`` und ``received_at`` werden ins Faktenpaket übernommen
+    (keine ``message_id``/``chat_id`` — Reduktion auf den reinen Text);
+    jeder Eintrag erhält ``untrusted: true``. Deterministische Begrenzung
+    gegen einen unbounded Prompt-/Kostenvektor: maximal
+    ``MAX_OPEN_POINTS`` Punkte, jeder Text auf ``MAX_OPEN_POINT_CHARS``
+    Zeichen gekürzt (dokumentiert in den Konstanten). Die Persistenzdatei
+    wird NIE mutiert — der Input bleibt unverändert, es entstehen nur neue
+    begrenzte Paket-Objekte. Nicht-dict/fehlerhafte Einträge werden
+    übersprungen; None/leer -> [].
+    """
+    if not isinstance(open_points, list):
+        return []
+    reduced: list[dict] = []
+    for point in open_points[:MAX_OPEN_POINTS]:
+        if not isinstance(point, dict):
+            continue
+        text = point.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        received_at = point.get("received_at")
+        entry: dict = {"text": text[:MAX_OPEN_POINT_CHARS], "untrusted": True}
+        if isinstance(received_at, str) and received_at.strip():
+            entry["received_at"] = received_at
+        reduced.append(entry)
+    return reduced
+
+
 def build_facts_package(
     portfolio: dict,
     transactions: list,
@@ -295,6 +334,7 @@ def build_facts_package(
     previous_snapshot: dict | None = None,
     current_captured_at: str | None = None,
     watchlist: list | None = None,
+    open_points: list | None = None,
 ) -> dict:
     """Build the deterministic, JSON-serializable facts package.
 
@@ -327,6 +367,17 @@ def build_facts_package(
     ``watchlist`` (optional, Phase 5): normalisierte Watchlist-Items
     (sc_bridge.normalize_watchlist_items) bzw. leer, wenn keine Watchlist
     vorhanden ist (legitimer Zustand -> leere Signal-Sektionen).
+
+    ``open_points`` (optional, P7): offene Punkte aus dem Telegram-Rückkanal
+    (telegram_inbound.load_open_points). Sie sind UNTRUSTED user input und
+    werden als separater Kontext ``open_points`` ins Paket geschrieben —
+    reduziert auf ``{text, received_at}`` mit ``untrusted: true`` pro Eintrag,
+    deterministisch begrenzt (``_reduce_open_points``: MAX_OPEN_POINTS,
+    MAX_OPEN_POINT_CHARS). Sie fliessen NICHT in ``deterministic_summary``
+    (keine deterministischen Fakten/Zahlenquelle) und koennen weder Zahlen,
+    Labels, Ampel, Strategie noch Prompt-Instruktionen ueberschreiben.
+    Ohne Argument (None) bleibt das Paket strukturell unveraendert
+    (rueckwaertskompatibel).
     """
     summary = _deterministic_summary(portfolio, analysis, data_quality)
     strategy_diff = changes.get("strategy") if isinstance(changes, dict) else None
@@ -396,6 +447,7 @@ def build_facts_package(
         "strategy_diff": strategy_diff,
         "deterministic_summary": summary,
         "strategy_thresholds_pct": _strategy_thresholds_pct(strategy),
+        "open_points": _reduce_open_points(open_points),
     }
     triggers = compute_triggers(package)
     package["triggers"] = triggers

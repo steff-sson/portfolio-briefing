@@ -37,6 +37,7 @@ from scripts import (
     sc_bridge,
     send_telegram,
     snapshot,
+    telegram_inbound,
     verify,
 )
 
@@ -214,6 +215,12 @@ def run(mode: str, dry_run: bool = False) -> int:
                 idea_news = filter_news.fetch_news_for_unlisted_ideas(portfolio)
                 seen = {str(n.get("title", "")) for n in news if isinstance(n, dict)}
                 news = news + [n for n in idea_news if isinstance(n, dict) and str(n.get("title", "")) not in seen]
+            # P7: Offene Punkte aus dem Telegram-Rückkanal laden (untrusted
+            # user input, status=open). Im Dry-Run wird der geladene Kontext
+            # NICHT als resolved markiert (kein Persistenz-Nebenwirkung);
+            # gepollt wird hier nie — das macht nur telegram_inbound.pull_and_ack
+            # (P6/P8, Cron bleibt unangetastet).
+            open_points = telegram_inbound.load_open_points()
             facts_package = facts.build_facts_package(
                 portfolio,
                 transactions,
@@ -226,6 +233,7 @@ def run(mode: str, dry_run: bool = False) -> int:
                 previous_snapshot=previous if not dry_run else None,
                 current_captured_at=staged["snapshot"]["captured_at"] if (not dry_run and staged) else None,
                 watchlist=watchlist,
+                open_points=open_points,
             )
             logging.info("facts package built")
         except Exception as e:
@@ -319,6 +327,27 @@ def run(mode: str, dry_run: bool = False) -> int:
         except Exception as e:
             _alert(f"send failed: {e}\n{traceback.format_exc()}")
             return 1
+
+        # P7-Lebenszyklus: erst NACH final_gate + Render + erfolgreichem
+        # Versand werden die eingespeisten offenen Punkte resolved. Jeder
+        # Fehlerpfad davor (facts/LLM/verify/gate/render/send) kehrt frueher
+        # zurueck — die Punkte bleiben open und fliessen ins naechste
+        # Briefing. Fehler beim Markieren duerfen den bereits erfolgreichen
+        # Versand nicht blockieren, werden aber sauber geloggt.
+        if not dry_run and open_points:
+            for point in open_points:
+                message_id = point.get("message_id")
+                if not isinstance(message_id, int):
+                    continue
+                try:
+                    telegram_inbound.mark_resolved(message_id)
+                    logging.info("open point resolved (message_id=%s)", message_id)
+                except Exception:
+                    # Nie den Versand rueckwirkend blockieren — nur loggen.
+                    logging.exception(
+                        "open point mark_resolved failed (message_id=%s) — Punkt bleibt offen",
+                        message_id,
+                    )
 
         logging.info("Briefing run completed successfully")
         return 0
