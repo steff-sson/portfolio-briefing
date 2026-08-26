@@ -552,6 +552,28 @@ def _strategy_thresholds_pct(strategy_thresholds: dict) -> list[float]:
     return values
 
 
+def _holdings_weights_pct(facts_package: dict) -> list[float]:
+    """Positions-Gewichte der Holdings (value_eur / Summe aller value_eur * 100).
+
+    Deterministische Paket-Fakten (Live-Fix): das LLM darf legitime
+    Positions-Gewichte (z.B. 22.3%, 12.1%) nennen, die aus den value_eur-
+    Anteilen der Holdings an der Gesamtsumme folgen. None/0-Werte werden
+    ignoriert; fehlende Daten ergeben eine leere Liste (fail-closed).
+    """
+    holdings = facts_package.get("portfolio", {}).get("holdings", [])
+    if not isinstance(holdings, list):
+        return []
+    values = [h.get("value_eur") for h in holdings if isinstance(h, dict)]
+    total = sum(v for v in values if isinstance(v, (int, float)) and v > 0)
+    if not total:
+        return []
+    weights: list[float] = []
+    for value in values:
+        if isinstance(value, (int, float)) and value > 0:
+            weights.append(round(value / total * 100, 1))
+    return weights
+
+
 def _raw_check_name_violations(text: str) -> list[str]:
     """Rohe bekannte snake_case-Checknamen im Text (Original-Schreibweise).
 
@@ -836,6 +858,7 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     #    critical, egal wie nah sie an einem erlaubten Wert liegen).
     thresholds = facts_package.get("strategy_thresholds_pct", {})
     allowed = _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
+    allowed += _holdings_weights_pct(facts_package)  # Holdings-Gewichte sind deterministische Paket-Fakten
     allowed += _summary_watchlist_scores(summary)  # Phase 5: Signal-Score-Ganzzahlen
     allowed_formatted = sorted({f"{value:.1f}" for value in allowed})
     for num in _extract_numbers(text):

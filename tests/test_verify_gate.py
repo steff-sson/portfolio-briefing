@@ -169,6 +169,49 @@ class TestVerifyDraft:
         draft = VALID_DRAFT.replace("24.8%", "24.79%")
         assert verify.verify_draft(VALID_FACTS, draft) == []
 
+    def test_holdings_weights_are_allowed(self):
+        """Live-Fix: Positions-Gewichte (value_eur-Anteile der Holdings) sind
+        deterministische Paket-Fakten — ein Draft mit 75.0%/25.0% (aus
+        value_eur 75000/25000) loest KEIN Zahlen-Finding aus."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "US0378331005", "name": "Apple Inc.", "value_eur": 75000.0},
+                {"isin": "NL0010273215", "name": "ASML", "value_eur": 25000.0},
+            ]
+        }
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            "Apple (AAPL, US0378331005) bei 75.0%, ASML (NL0010273215) bei 25.0%.",
+        )
+        findings = verify.verify_draft(facts, draft)
+        assert not any(f["severity"] == "critical" and "passt nicht 1:1" in f["issue"] for f in findings)
+
+    def test_unknown_number_stays_critical_with_holdings_weights(self):
+        """Fail-closed bleibt: 33.3% ist kein Holdings-Gewicht (75/25) — auch
+        mit erlaubten Positions-Gewichten bleibt die halluzinierte Zahl critical."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["portfolio"] = {
+            "holdings": [
+                {"isin": "US0378331005", "name": "Apple Inc.", "value_eur": 75000.0},
+                {"isin": "NL0010273215", "name": "ASML", "value_eur": 25000.0},
+            ]
+        }
+        draft = VALID_DRAFT.replace("24.8%", "33.3%")
+        findings = verify.verify_draft(facts, draft)
+        assert any(f["severity"] == "critical" and "33.3" in f["issue"] for f in findings)
+
+    def test_holdings_weights_fault_tolerant(self):
+        """_holdings_weights_pct: None/0-Werte ignoriert, fehlende Daten -> []."""
+        assert verify._holdings_weights_pct({}) == []
+        assert verify._holdings_weights_pct({"portfolio": {}}) == []
+        assert verify._holdings_weights_pct(
+            {"portfolio": {"holdings": [{"value_eur": None}, {"value_eur": 0}]}}
+        ) == []
+        assert verify._holdings_weights_pct(
+            {"portfolio": {"holdings": [{"value_eur": 75000.0}, {"value_eur": 25000.0}]}}
+        ) == [75.0, 25.0]
+
     def test_comma_decimal_percentage_is_checked(self):
         """P0.3: Komma-Dezimalen werden erkannt — korrekter Wert passiert,
         halluzinierter Wert (88,8%) bleibt critical (kein Umgehen der Pruefung)."""

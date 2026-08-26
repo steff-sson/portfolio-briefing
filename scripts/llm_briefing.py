@@ -33,16 +33,53 @@ def _load_prompt(mode: str, context: dict) -> str:
     Mode-independent: the single ``briefing.txt`` template replaces the old
     per-mode prompts (monday/friday/monthly/humanize). ``context`` must
     provide the placeholder ``facts`` (raw dict — the values are
-    JSON-serialized here).
+    JSON-serialized here). Nach der Fakten-Serialisierung wird die
+    deterministische ZULÄSSIGE-ZAHLEN-Allowlist angehängt (gleiche Quelle
+    wie das verify-Gate); der q4_tax_context-Anhang bleibt danach.
     """
     prompt_file = PROMPTS_DIR / "briefing.txt"
     template = prompt_file.read_text(encoding="utf-8")
+    prompt = template.format(
+        facts=json.dumps(context.get("facts") or {}, ensure_ascii=False, indent=2),
+    )
+    prompt += _zulaessige_zahlen_block(context.get("facts") or {})
     if 10 <= datetime.now().month <= 12:
         tax_file = PROMPTS_DIR / "q4_tax_context.txt"
         if tax_file.exists():
-            template = template + "\n\n" + tax_file.read_text(encoding="utf-8")
-    return template.format(
-        facts=json.dumps(context.get("facts") or {}, ensure_ascii=False, indent=2),
+            prompt = prompt + "\n\n" + tax_file.read_text(encoding="utf-8")
+    return prompt
+
+
+def _zulaessige_zahlen_block(facts_package: dict) -> str:
+    """Deterministische ``ZULÄSSIGE ZAHLEN``-Allowlist am Prompt-Ende.
+
+    Vereinigt summary-Prozente, Strategie-Grenzwerte und Holdings-Gewichte —
+    alle direkt aus verify (gleiche Quelle wie das Gate, kann nie
+    divergieren): dedupliziert, absteigend sortiert, 1 Dezimalstelle.
+    """
+    from scripts.verify import (
+        _holdings_weights_pct,
+        _strategy_thresholds_pct,
+        _summary_numbers_pct,
+    )
+
+    summary = facts_package.get("deterministic_summary", {})
+    thresholds = facts_package.get("strategy_thresholds_pct", {})
+    values = sorted(
+        set(
+            _summary_numbers_pct(summary)
+            + _strategy_thresholds_pct(thresholds)
+            + _holdings_weights_pct(facts_package)
+        ),
+        reverse=True,
+    )
+    if values:
+        numbers = ", ".join(f"{value:.1f}" for value in values)
+    else:
+        numbers = "(keine — keine Prozentwerte zulässig)"
+    return (
+        "\n\n## ZULÄSSIGE ZAHLEN (nur diese dürfen im Briefing vorkommen)\n"
+        f"{numbers}\n"
     )
 
 
@@ -124,14 +161,23 @@ def _allowed_pct_values(facts_package: dict) -> list[float]:
     """Prozentwerte, die der Draft verwenden darf — gleiche Quelle wie verify.
 
     Reuses verify's extraction unchanged (deterministic_summary ratios -> %,
-    positive strategy thresholds as-is), so the prompt allowlist can never
-    diverge from the verify gate. No new tolerance/allowlist logic here.
+    positive strategy thresholds as-is, Holdings-Gewichte aus value_eur), so
+    the prompt allowlist can never diverge from the verify gate. No new
+    tolerance/allowlist logic here.
     """
-    from scripts.verify import _strategy_thresholds_pct, _summary_numbers_pct
+    from scripts.verify import (
+        _holdings_weights_pct,
+        _strategy_thresholds_pct,
+        _summary_numbers_pct,
+    )
 
     summary = facts_package.get("deterministic_summary", {})
     thresholds = facts_package.get("strategy_thresholds_pct", {})
-    return _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
+    return (
+        _summary_numbers_pct(summary)
+        + _strategy_thresholds_pct(thresholds)
+        + _holdings_weights_pct(facts_package)
+    )
 
 
 def _format_allowed_pct_list(facts_package: dict) -> str:

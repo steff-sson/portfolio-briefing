@@ -299,11 +299,16 @@ def test_allowed_pct_values_use_verify_source():
     assert llm_briefing._allowed_pct_values(facts) == (
         verify._summary_numbers_pct(facts["deterministic_summary"])
         + verify._strategy_thresholds_pct(facts["strategy_thresholds_pct"])
+        + verify._holdings_weights_pct(facts)
     )
 
 
 def test_format_allowed_pct_list_one_decimal_sorted_deduped():
-    """Deterministische Formatierung: 1 Dezimalstelle, sortiert, dedupliziert."""
+    """Deterministische Formatierung: 1 Dezimalstelle, sortiert, dedupliziert.
+
+    Entspricht exakt der verify-Allowlist (deterministic_summary + thresholds
+    + Holdings-Gewichte aus value_eur 2400/1850 -> 56.5%/43.5%).
+    """
     line = llm_briefing._format_allowed_pct_list(_facts_package())
     assert line == "ZULÄSSIGE ZAHLEN: 0.0%, 5.0%, 15.0%, 25.0%, 30.0%, 31.5%, 43.5%, 56.5%, 75.0%"
 
@@ -317,9 +322,9 @@ def test_format_allowed_pct_list_empty_is_fail_closed():
 
 
 def test_draft_prompt_contains_formatted_allowlist(monkeypatch):
-    """Draft-Prompt: Allowlist mit formatierten Prozentwerten ist NICHT mehr
-    Teil des Prompts (1-Call-Architektur: das volle Paket ist die Quelle,
-    verify prueft 1:1). Der Prompt ersetzt den {facts}-Platzhalter."""
+    """Draft-Prompt: der ZULÄSSIGE-ZAHLEN-Block haengt nach der Fakten-
+    Serialisierung an briefing.txt an (gleiche Quelle wie verify) — inkl.
+    Holdings-Gewichtswerte aus value_eur (56.5%/43.5% fuer 2400/1850)."""
     captured: dict = {}
 
     class _CaptureCompletions:
@@ -339,12 +344,18 @@ def test_draft_prompt_contains_formatted_allowlist(monkeypatch):
     llm_briefing.generate_draft(_facts_package(), mode="monday")
     prompt = captured["messages"][1]["content"]
 
-    # Der neue Prompt ist briefing.txt (ohne ZULÄSSIGE-ZAHLEN-Allowlist-Zeile)
-    # und enthaelt das serialisierte Paket.
-    assert "ZULÄSSIGE ZAHLEN:" not in prompt
+    # Der Prompt ist briefing.txt + ZULÄSSIGE-ZAHLEN-Block (nach der
+    # Fakten-Serialisierung) und enthaelt das serialisierte Paket.
     assert "Du bist ein Finanz-Briefing-Autor." in prompt
+    assert "## ZULÄSSIGE ZAHLEN (nur diese dürfen im Briefing vorkommen)" in prompt
     assert '"core_pct": 75.0' in prompt  # Paket-Werte sind da (1:1-Quelle)
     assert '"turnover_ratio": 0.0' in prompt
+
+    # Allowlist enthaelt Holdings-Gewichtswerte (value_eur 2400/1850 -> 56.5%/43.5%)
+    # und die Serialisierung liegt VOR dem Block.
+    assert prompt.index('"value_eur": 2400.0') < prompt.index("## ZULÄSSIGE ZAHLEN")
+    assert "56.5" in prompt
+    assert "43.5" in prompt
 
 
 def test_briefing_prompt_has_six_section_contract():
