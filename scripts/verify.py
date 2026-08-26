@@ -35,8 +35,8 @@ DRAFT_SECTIONS = [
 # Signale stammen nie aus Fundamentaldaten (Umsatz/Gewinn/Cashflow/
 # Verschuldung/Bewertung sind nicht automatisch verfuegbar und fliessen
 # nicht in ein Signal) — nur aus Strategie-Fit, Portfolio-Fit,
-# 7-Tage-RSS-News und sc-Kursen. Identisch zu final_briefing.FUNDAMENTALS_DISCLAIMER
-# (ohne Import-Zyklus bewusst als Konstante dupliziert — fachlicher Contract).
+# 7-Tage-RSS-News und sc-Kursen. Fachlicher Contract, von verify definiert
+# und 1:1 vom Renderer-Check erwartet.
 # Case-insensitive geprueft: der Marker ist ein Substring des Renderer-Texts,
 # die Pruefung vergleicht beide Seiten in Kleinschreibung (Umlaute,
 # Gross-/Kleinschreibung spielen keine Rolle).
@@ -160,8 +160,8 @@ def _position_actions(facts_package: dict) -> list:
 def _non_excluded_action_signals(facts_package: dict, labels: tuple) -> list:
     """Signal-Objekte mit Signal-Label in ``labels``, ohne excluded-Marker.
 
-    Gleiche Ausschlussregel wie der Renderer (final_briefing
-    _section_naechster_schritt/_section_sell_reduce_signals): excluded=True
+    Gleiche Ausschlussregel wie der Renderer-Contract
+    (_section_naechster_schritt/_section_sell_reduce_signals): excluded=True
     markiert Core-ETFs/SUSE-Legacy — die zaehlen nie als Handlungssignal.
     """
     summary = facts_package.get("deterministic_summary", {})
@@ -178,8 +178,8 @@ def _non_excluded_action_signals(facts_package: dict, labels: tuple) -> list:
 def _naechster_schritt_handlungsbedarf(facts_package: dict) -> bool:
     """Konkrete Handlungssignale fuer die no-action-Regel (Phase 5)?
 
-    Deckt sich 1:1 mit dem Renderer-Contract (final_briefing
-    _section_naechster_schritt): SELL/REDUCE auf bestehenden Satellites,
+    Deckt sich 1:1 mit dem Renderer-Contract
+    (_section_naechster_schritt): SELL/REDUCE auf bestehenden Satellites,
     BUY auf der Watchlist oder nicht-leere position_actions. Nur diese
     Signale erzeugen konkreten Handlungstext — rote/gelbe Checks allein
     sind keine Handlungsempfehlung und blocken die no-action-Phrase nicht.
@@ -476,11 +476,11 @@ def _extract_tickers(text: str) -> set[str]:
         "S&P", "MSCI", "FTSE",
         # Gesamt-Empfehlungs-Labels (Plan §6a) — keine Ticker.
         "BUY", "SELL", "WATCH",
-        # Deterministische Signal-Labels (Phase 5, final_briefing._SIGNAL_LABELS):
+        # Deterministische Signal-Labels (Signal-Status, keine Ticker):
         # "NO SIGNAL" (rendered z.B. als "Keine Watchlist-Signale (NO SIGNAL
         # für alle Positionen).") ist ein Signal-Status, kein Ticker.
         "NO", "SIGNAL",
-        # Weitere Signal-Labels (final_briefing._SIGNAL_LABELS): AVOID/REDUCE
+        # Weitere Signal-Labels: AVOID/REDUCE
         # sind Signal-Status gerenderter Sell-/Watchlist-Signale, keine Ticker.
         "AVOID", "REDUCE",
         # SUSE SE (LU2722255754, illiquide Legacy-Position): gerenderte
@@ -776,7 +776,7 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     # 2a. Naechster-Schritt-Konformitaet (Phase 5): "Keine Aktion erforderlich"
     #     in der "## Naechster Schritt"-Sektion blockt als critical, wenn das
     #     Faktenpaket KONKRETE Handlungssignale ausweist (deterministischer
-    #     Renderer-Contract final_briefing._section_naechster_schritt):
+    #     Renderer-Contract _section_naechster_schritt):
     #     - nicht-excluded SELL/REDUCE in satellite_sell_signals,
     #     - BUY in watchlist_signals,
     #     - nicht-leere position_actions.
@@ -850,8 +850,8 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     portfolio_tickers = {h.get("ticker", "") for h in holdings if h.get("ticker")}
     portfolio_isins = {h.get("isin", "") for h in holdings if h.get("isin")}
     # Signal-ISINs (Watchlist-Kandidaten + Satellite-SELLs) sind legitim im
-    # Draft — 1:1 aus deterministic_summary, per Renderer (final_briefing
-    # _section_watchlist_signals/_section_sell_reduce_signals) gerendert.
+    # Draft — 1:1 aus deterministic_summary, per Renderer-Contract
+    # (_section_watchlist_signals/_section_sell_reduce_signals) gerendert.
     signal_isins = {
         str(s.get("isin", ""))
         for key in ("watchlist_signals", "satellite_sell_signals")

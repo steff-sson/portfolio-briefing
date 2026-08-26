@@ -13,11 +13,10 @@ Persistenz nur ueber das Snapshot-Modul (kein update_config).
 1-Call-Architektur (Plan 1-Call-Briefing): Faktenpaket -> EIN LLM-Call
 (llm_briefing.generate_draft, deepseek-v4-flash, fachliche Quelle) ->
 verify_draft (deterministisch, 1:1 gegen das Faktenpaket) -> final_gate
-(verification-only, fail-closed bei critical/major) -> Versand. Humanize-/
-Review-/Revise-Stufe und der deterministische final_briefing-Render sind
-entfernt. Der Dry-Run-Pfad nutzt unveraendert _dry_run_placeholder (kein
-LLM-Call).
-"""
+(verification-only, fail-closed bei critical/major) -> Versand. Die alte
+Humanize-/Review-/Revise-Stufe ist entfernt (1-Call-Architektur). Der
+Dry-Run-Pfad nutzt unveraendert _dry_run_placeholder (kein
+LLM-Call)."""
 from __future__ import annotations
 
 import argparse
@@ -245,7 +244,7 @@ def run(mode: str, dry_run: bool = False) -> int:
         # Faktenpaket (Zahlen/Labels/Signale 1:1, Sektions-Contract). Der
         # Dry-Run bleibt netzwerkfrei: Platzhalter _dry_run_placeholder
         # (kein LLM-Call). Fail-closed: kein Fallback auf einen
-        # deterministischen Render (final_briefing ist entfernt).
+        # deterministischen Render (1-Call-Architektur).
         try:
             if dry_run:
                 draft = _dry_run_placeholder(facts_package)
