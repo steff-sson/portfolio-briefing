@@ -278,6 +278,14 @@ def _validate_schema_value(spec: dict, value: object, errors: list[str], path: s
 
     Wandelt das Feld inkl. Pfadangabe. ``spec`` muss eine Schema-Feldspez
     sein (dict mit "type"); ``path`` ist der Fehler-Pfad (z.B. "portfolio.core_pct").
+
+    Dict-Felder werden je nach Spezifikation validiert:
+    - ``fields`` (feste Struktur): bekannte Schlüssel typgeprüft, unbekannte
+      Schlüssel schlagen fehl (fail-closed), required-Felder müssen da sein.
+    - ``mapping: analyserelevant`` + ``fields`` (dynamische Schlüssel, z.B.
+      ISINs in holdings_classification.isins): jeder Schlüssel wird als
+      dynamisches Element gegen das Subschema validiert (fail-closed bei
+      unbekannten Feldnamen, Typ-/Enum-Prüfung der Werte).
     """
     field_type = spec.get("type")
     if field_type == "str":
@@ -302,9 +310,19 @@ def _validate_schema_value(spec: dict, value: object, errors: list[str], path: s
     elif field_type == "dict":
         if not isinstance(value, dict):
             errors.append(f"{path} muss ein Dict sein")
+            return
         nested = spec.get("fields")
-        if isinstance(value, dict) and isinstance(nested, dict):
-            _validate_schema_dict(value, nested, errors, path)
+        if isinstance(nested, dict):
+            if spec.get("dynamic") is True:
+                # Dynamische Schlüssel (z.B. ISINs): jedes Element gegen das
+                # Subschema validieren, unbekannte Feldnamen fail-closed.
+                for key, item in value.items():
+                    if not isinstance(item, dict):
+                        errors.append(f"{path}.{key} muss ein Dict sein")
+                        continue
+                    _validate_schema_dict(item, nested, errors, f"{path}.{key}")
+            else:
+                _validate_schema_dict(value, nested, errors, path)
 
 
 def _validate_schema_dict(value: dict, nested: dict, errors: list[str], path: str) -> None:
@@ -497,6 +515,62 @@ def _alerts(strategy: dict) -> dict:
     return alerts if isinstance(alerts, dict) else {}
 
 
+def _holding_category(holding: dict, strategy: dict) -> str:
+    """Kategorie einer Holding: Strategie-Intent (confirmed) -> Rohdaten -> etf_lookup.
+
+    Fallback-Kette (Plan strategy-assistant-feedback.md, P2):
+    1. ``strategy["holdings_classification"]["isins"][<ISIN>]`` mit
+       ``confirmed: true`` -> die dort hinterlegte Kategorie (Strategie-Intent).
+    2. Sonst Roh-``category``-Feld der Holding (bereits von sc_bridge mit
+       etf_lookup angereichert; fehlende Rohdaten -> "unknown").
+    3. Sonst ``etf_lookup[<ISIN>]["category"]`` (Abwärtskompatibilität).
+    4. Sonst ``"unknown"``.
+
+    Fail-closed: unbestaetigte (``confirmed`` fehlt/false) oder unbekannte
+    Klassifikationen werden NICHT erfunden — sie bleiben bei der
+    Rohdaten-Kategorie bzw. "unknown". SUSE/Legacy wird hier nicht
+    automatisch klassifiziert.
+    """
+    classification = _strategy_isin_classification(holding, strategy)
+    if classification is not None:
+        return classification
+    category = holding.get("category")
+    if isinstance(category, str) and category:
+        return category
+    lookup_entry = load_etf_lookup().get(str(holding.get("isin") or ""))
+    if isinstance(lookup_entry, dict):
+        lookup_category = lookup_entry.get("category")
+        if isinstance(lookup_category, str) and lookup_category:
+            return lookup_category
+    return "unknown"
+
+
+def _strategy_isin_classification(holding: dict, strategy: dict) -> str | None:
+    """Strategie-Klassifikation einer ISIN (nur confirmed: true), sonst None.
+
+    Liest ``strategy["holdings_classification"]["isins"][<ISIN>]["category"]``
+    und liefert sie nur, wenn das Feld ``confirmed: true`` ist. Unbestaetigte,
+    fehlende oder ungueltige Eintraege -> None (fail-closed, keine Heuristik).
+    """
+    if not isinstance(strategy, dict):
+        return None
+    section = strategy.get("holdings_classification")
+    if not isinstance(section, dict):
+        return None
+    isins = section.get("isins")
+    if not isinstance(isins, dict):
+        return None
+    entry = isins.get(str(holding.get("isin") or ""))
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("confirmed") is not True:
+        return None
+    category = entry.get("category")
+    if isinstance(category, str) and category:
+        return category
+    return None
+
+
 def calculate_positions(portfolio: dict) -> dict:
     holdings = portfolio.get("holdings", [])
     if not isinstance(holdings, list):
@@ -529,10 +603,13 @@ def calculate_core_satellite(positions: list, strategy: dict) -> dict:
     separat ausgewiesen und keiner Kategorie zugeschlagen. Toleranzband =
     core_pct ± rebalancing.threshold_pct. Fehlende Werte ergeben das Band
     0..0 -> jeder positive Ratio ist red (fail-closed).
+
+    Kategorie je Position: Strategie-Klassifikation (confirmed) -> Rohdaten-
+    category -> etf_lookup (siehe _holding_category).
     """
     total = sum(p["value_eur"] for p in positions)
-    core_value = sum(p["value_eur"] for p in positions if p["category"] == "core")
-    satellite_value = sum(p["value_eur"] for p in positions if p["category"] == "satellite")
+    core_value = sum(p["value_eur"] for p in positions if _holding_category(p, strategy) == "core")
+    satellite_value = sum(p["value_eur"] for p in positions if _holding_category(p, strategy) == "satellite")
     ratio = core_value / total if total else 0
     target = _pct(_portfolio_cfg(strategy).get("core_pct"))
     threshold = _pct(_rebalancing_cfg(strategy).get("threshold_pct"))
@@ -591,7 +668,7 @@ def calculate_drift(positions: list, strategy: dict) -> dict:
     """Core-Drift gegen portfolio.core_pct und rebalancing.threshold_pct."""
     target = _pct(_portfolio_cfg(strategy).get("core_pct"))
     threshold = _pct(_rebalancing_cfg(strategy).get("threshold_pct"))
-    actual = sum(p["weight"] for p in positions if p["category"] == "core")
+    actual = sum(p["weight"] for p in positions if _holding_category(p, strategy) == "core")
     drift = abs(actual - target)
     return {
         "core_ratio_actual": round(actual, 4),
@@ -1182,8 +1259,11 @@ def _dimension_strategy_fit(item: dict, strategy: dict) -> int | None:
       kein Sektor-Signal, aber bekannte Kategorie.
     - Sektor in ``sectors.preferred`` -> +1, in ``sectors.excluded`` -> -1,
       sonst 0.
+
+    Kategorie je Item: Strategie-Klassifikation (confirmed) -> Rohdaten-
+    category -> etf_lookup (siehe _holding_category).
     """
-    category = item.get("category")
+    category = _holding_category(item, strategy)
     if category == "core":
         base = 1
     elif category == "satellite":
@@ -1416,11 +1496,13 @@ def compute_watchlist_signals(
         item_isin = str(item.get("isin") or "")
         if not item_isin:
             continue
-        category = item.get("category") or "unknown"
+        category = _holding_category(item, strategy)
         name = str(item.get("name") or item_isin)
 
         # Harte Ausschlussregeln: kein Signal fuer Core-ETFs und Legacy/illiquide.
-        if category == "core" or item_isin in ILLIQUID_LEGACY_ISINS:
+        # SUSE/LU2722255754 bleibt ueber ILLIQUID_LEGACY_ISINS abgedeckt; eine
+        # Strategie-Klassifikation "legacy" (confirmed) blockt ebenfalls Signale.
+        if category == "core" or item_isin in ILLIQUID_LEGACY_ISINS or category == "legacy":
             signals.append({
                 "isin": item_isin,
                 "name": name,

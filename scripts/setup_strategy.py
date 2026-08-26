@@ -76,7 +76,13 @@ def _schema_sections(schema: dict) -> dict:
 
 
 def _all_schema_fields(schema: dict) -> list[tuple[str, str, dict]]:
-    """Alle (section, field, spec) aus dem Schema, inkl. verschachtelter dict-Felder."""
+    """Alle (section, field, spec) aus dem Schema, inkl. verschachtelter dict-Felder.
+
+    Felder unter einem ``dynamic: true``-Container (z.B.
+    holdings_classification.isins.category) werden mit ``"dynamic"`` als
+    section-Vorsilbe markiert — sie sind nur pro dynamischem Schlüssel
+    Pflicht, nicht als einzelne Setup-Antwort (die Sektion ist optional).
+    """
     result: list[tuple[str, str, dict]] = []
     for section, section_spec in _schema_sections(schema).items():
         if not isinstance(section_spec, dict):
@@ -93,7 +99,10 @@ def _all_schema_fields(schema: dict) -> list[tuple[str, str, dict]]:
                 if isinstance(nested, dict):
                     for nf, nspec in nested.items():
                         if isinstance(nspec, dict):
-                            result.append((f"{section}.{field}", nf, nspec))
+                            if spec.get("dynamic") is True:
+                                result.append((f"{section}.{field}.dynamic", nf, nspec))
+                            else:
+                                result.append((f"{section}.{field}", nf, nspec))
     return result
 
 
@@ -127,8 +136,11 @@ def _validate_answers_structure(answers: dict, schema: dict) -> list[str]:
 
     # Analyserelevante Pflichtfelder: nur die Blatt-Felder des Schemas muessen
     # beantwortet sein (dict-Container wie portfolio.rebalancing sind Sammlungen,
-    # keine eigenen Antworten).
+    # keine eigenen Antworten; dynamische Felder unter einem optionalen
+    # Container wie holdings_classification.isins sind keine Pflicht-Antworten).
     for section, field, spec in _all_schema_fields(schema):
+        if ".dynamic" in section:
+            continue  # dynamische Felder: nur pro ISIN-Eintrag Pflicht, nicht global
         if spec.get("mapping") != "analyserelevant":
             continue
         if spec.get("type") == "dict":

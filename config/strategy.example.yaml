@@ -90,3 +90,25 @@ review_schedule:
   quarterly_strategy_review: true       # bool
   annual_full_review: true              # bool
   triggers: ["life_event", "market_crash_20pct", "income_change_30pct"]  # list[str]
+
+# optional — Core/Satellite-Klassifikation pro ISIN (Strategie-Intent, P1)
+#
+# Fehlt die Sektion, bleibt die bestehende Fallback-Kette aktiv (Roh-category
+# -> etf_lookup -> unknown). Die Klassifikation ist ein Strategie-Feld, keine
+# Rohdaten-Kategorie: sie überschreibt die Rohdaten nur bei "confirmed: true".
+# Unbestätigte/fehlende Einträge werden wie "unknown" behandelt (fail-closed,
+# keine blinde Heuristik). SUSE/Legacy wird NICHT automatisch klassifiziert.
+holdings_classification:
+  isins:
+    IE00BK5BQT80:                      # ISIN -> Klassifikation (Beispiel)
+      category: core                   # enum: core|satellite|legacy|unknown (Pflicht)
+      confirmed: true                  # bool — nur confirmed gilt als Klassifikation
+      source: user                     # str — etf_lookup|user|live (dokumentierend)
+    IE00B4L5Y983:
+      category: core
+      confirmed: true
+      source: user
+    LU2722255754:                      # SUSE — illiquide Legacy (Beispiel)
+      category: legacy
+      confirmed: true
+      source: user

@@ -129,6 +129,137 @@ def test_validate_strategy_date_format():
     assert any("meta.created muss ein Datum sein" in e for e in result["errors"])
 
 
+# --- P1: holdings_classification (Strategie-Intent, backward-compatible) -----
+
+
+def _with_classification(strategy: dict, isins: dict) -> dict:
+    import copy
+
+    s = copy.deepcopy(strategy)
+    s["holdings_classification"] = {"isins": isins}
+    return s
+
+
+def test_validate_strategy_classification_accepted():
+    """Schema akzeptiert holdings_classification mit validen ISIN-Einträgen."""
+    strat = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True, "source": "user"},
+        "LU2722255754": {"category": "legacy", "confirmed": True, "source": "user"},
+    })
+    result = analyze.validate_strategy(strat)
+    assert result["valid"] is True, result["errors"]
+
+
+def test_validate_strategy_classification_absent_is_valid():
+    """Abwärtskompatibilität: strategy.yaml ohne holdings_classification bleibt valide."""
+    result = analyze.validate_strategy(FULL_STRATEGY)
+    assert result["valid"] is True, result["errors"]
+
+
+def test_validate_strategy_classification_empty_isins_valid():
+    """Leerer isins-Block ist valide (Sektion vorhanden, keine Einträge)."""
+    strat = _with_classification(FULL_STRATEGY, {})
+    result = analyze.validate_strategy(strat)
+    assert result["valid"] is True, result["errors"]
+
+
+def test_validate_strategy_classification_unknown_enum_fail_closed():
+    """category-Enum fail-closed: unbekannter Wert schlägt fehl."""
+    strat = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "mega", "confirmed": True},
+    })
+    result = analyze.validate_strategy(strat)
+    assert result["valid"] is False
+    assert any(
+        "holdings_classification.isins.IE00BK5BQT80.category" in e and "core" in e
+        for e in result["errors"]
+    )
+
+
+def test_validate_strategy_classification_unknown_field_fail_closed():
+    """Unbekanntes Feld in einem ISIN-Eintrag schlägt fehl (fail-closed)."""
+    strat = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True, "quatsch": 1},
+    })
+    result = analyze.validate_strategy(strat)
+    assert result["valid"] is False
+    assert any("quatsch" in e for e in result["errors"])
+
+
+def test_holding_category_strategy_overrides_raw():
+    """Strategie-Klassifikation (confirmed) überschreibt die Rohdaten-Kategorie."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True, "source": "user"},
+    })
+    holding = {"isin": "IE00BK5BQT80", "category": "satellite"}
+    assert analyze._holding_category(holding, strategy) == "core"
+
+
+def test_holding_category_unconfirmed_falls_back_to_raw():
+    """Unbestätigte Klassifikation (confirmed fehlt/false) gilt NICHT — Rohdaten bleiben."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": False},
+    })
+    holding = {"isin": "IE00BK5BQT80", "category": "satellite"}
+    assert analyze._holding_category(holding, strategy) == "satellite"
+
+
+def test_holding_category_missing_isin_keeps_raw():
+    """Nicht klassifizierte ISIN: Rohdaten-Kategorie bleibt (kein Erfinden)."""
+    strategy = _with_classification(FULL_STRATEGY, {"DE000BASF111": {"category": "core", "confirmed": True}})
+    assert analyze._holding_category({"isin": "US0378331005", "category": "satellite"}, strategy) == "satellite"
+    assert analyze._holding_category({"isin": "US0378331005"}, strategy) == "unknown"
+
+
+def test_holding_category_strategy_legacy_used():
+    """Strategie-Klassifikation 'legacy' wird als Kategorie aufgelöst."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "LU2722255754": {"category": "legacy", "confirmed": True, "source": "user"},
+    })
+    assert analyze._holding_category({"isin": "LU2722255754", "category": "unknown"}, strategy) == "legacy"
+
+
+def test_core_satellite_uses_strategy_classification():
+    """calculate_core_satellite nutzt die Strategie-Klassifikation statt Rohdaten."""
+    strategy = _with_classification(FULL_STRATEGY, {
+        "IE00BK5BQT80": {"category": "core", "confirmed": True},
+    })
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "unknown", "value_eur": 6000.0, "weight": 0.6},
+        {"isin": "US0378331005", "name": "Apple", "category": "satellite", "value_eur": 4000.0, "weight": 0.4},
+    ]
+    result = analyze.calculate_core_satellite(positions, strategy)
+    assert result["core_value_eur"] == 6000.0
+    assert result["satellite_value_eur"] == 4000.0
+    assert result["unknown_value_eur"] == 0.0
+
+
+def _signal_strategy_fixture() -> dict:
+    """Signal-taugliche Strategie: preferred/excluded Sektoren wie test_analyze."""
+    import copy
+
+    s = copy.deepcopy(FULL_STRATEGY)
+    s["sectors"] = {"preferred": ["technology", "ai", "energy"], "excluded": ["fossil_fuels", "defense"]}
+    return s
+
+
+def test_signal_legacy_classification_blocks_signal():
+    """Strategie-Klassifikation 'legacy' blockt Signale (NO SIGNAL, excluded)."""
+    strategy = _with_classification(_signal_strategy_fixture(), {
+        "DE000SUSE001": {"category": "legacy", "confirmed": True},
+    })
+    signals = analyze.compute_watchlist_signals(
+        [{"isin": "DE000SUSE001", "name": "SUSE", "category": "unknown", "sector": "software"}],
+        {"total_value_eur": 10000.0, "holdings": []},
+        {"checks": {"positions": {"positions": []}, "sector_concentration": {}, "single_position": {}}},
+        news=[],
+        strategy=strategy,
+    )
+    assert len(signals) == 1
+    assert signals[0]["signal"] == analyze.SIGNAL_NO_SIGNAL
+    assert signals[0]["excluded"] is True
+
+
 # --- Deterministischer Setup-Flow (Phase B) -----------------------------------
 
 

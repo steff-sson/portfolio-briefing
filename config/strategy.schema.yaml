@@ -257,5 +257,40 @@ sections:
         items: str
         comment: Frage 14 — Review-Trigger
 
+  holdings_classification:
+    required: false
+    comment: >
+      Optionale Core/Satellite-Klassifikation pro ISIN als Strategie-Intent
+      (Plan strategy-assistant-feedback.md, P1). Fehlt die Sektion, bleibt die
+      bestehende Fallback-Kette aktiv (Roh-category -> etf_lookup -> unknown).
+      Die Klassifikation gilt nur bei confirmed: true; unbestaetigte oder
+      fehlende Eintraege werden wie "unknown" behandelt (fail-closed, keine
+      blinde Heuristik). SUSE/Legacy wird NICHT automatisch klassifiziert.
+    fields:
+      isins:
+        type: dict
+        required: false
+        mapping: analyserelevant
+        dynamic: true
+        comment: "ISIN -> {category: core|satellite|legacy|unknown, confirmed: bool, source: str}"
+        fields:
+          # Jede ISIN ist ein verschachteltes Dict-Feld mit fester Feldspez:
+          category:
+            type: enum
+            required: true
+            mapping: analyserelevant
+            enum: [core, satellite, legacy, unknown]
+            comment: Klassifikation dieser ISIN (Strategie-Intent, keine Rohdaten-Kategorie)
+          confirmed:
+            type: bool
+            required: false
+            mapping: dokumentationsrelevant
+            comment: "Bestaetigung durch den User; nur confirmed: true gilt als Klassifikation"
+          source:
+            type: str
+            required: false
+            mapping: dokumentationsrelevant
+            comment: Quelle der Klassifikation (etf_lookup|user|live)
+
   # Bewusst informative / nicht-emittierte Felder (nur answers.reviewed.yaml + Doku):
   #   investor.external_provision, investor.personal_context, investor.check_frequency
