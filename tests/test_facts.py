@@ -123,6 +123,8 @@ def test_empty_news(portfolio, transactions):
         "data_quality_status", "data_quality_issues", "has_triggers",
         "traffic_lights", "recommendation", "position_actions",
         "position_perf_6m", "watchlist_signals", "satellite_sell_signals",
+        # Phase 3: Positions-/Sektor-Details (additiv)
+        "positions_detail", "sectors_detail",
     }
 
 
@@ -808,3 +810,163 @@ def test_open_points_skips_invalid_entries(portfolio, transactions):
         portfolio, transactions, {}, news=[], strategy={}, mode="monday", open_points=None
     )
     assert package_none["open_points"] == []
+
+
+# --- Phase 3: Positions-/Sektor-Details im deterministic_summary -------------
+#
+# facts._deterministic_summary traegt die additiven Detail-Felder
+# ``positions_detail`` und ``sectors_detail`` (Plan §3.2/§8.3). Die Zahlen
+# stammen aus den bereits berechneten analyze-Checks (nie neu berechnet);
+# Limits nur fuer Satellite, Core/Legacy/unknown -> None (``--`` in der
+# Briefing-Tabelle).
+
+_P3_STRATEGY = {
+    "portfolio": {
+        "core_pct": 70.0,
+        "satellite_pct": 30.0,
+        "rebalancing": {"threshold_pct": 5.0},
+    },
+    "satellite_limits": {
+        "target_position_pct": 5.0,
+        "max_position_pct": 10.0,
+        "max_sector_pct": 20.0,
+        "max_turnover_annual_pct": 30.0,
+    },
+}
+
+_P3_PORTFOLIO = {
+    "total_value_eur": 10000.0,
+    "holdings": [
+        {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0},
+        {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 3000.0, "sector": "Technology"},
+        {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": None},
+    ],
+}
+
+
+def _p3_analysis() -> dict:
+    """Analyse-Befunde: 2 bewertete Positionen, 1 unbewertete Legacy; nur
+    Satellite fliessen in die Sektor-Konzentration ein (Core/unknown nicht)."""
+    return {
+        "generated_at": "2026-08-28T09:00:00+02:00",
+        "overall_status": "green",
+        "checks": {
+            "positions": {
+                "total_value_eur": 9000.0,
+                "positions": [
+                    {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0, "weight": 0.6667},
+                    {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 3000.0, "weight": 0.3333, "sector": "Technology"},
+                    {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": 0.0, "weight": 0.0},
+                ],
+            },
+            "core_satellite": {"core_ratio": 0.6667, "status": "green"},
+            "sector_concentration": {
+                "sector_ratios": {"Technology": 1.0},
+                "max_sector": "Technology",
+                "max_ratio": 1.0,
+                "status": "red",
+            },
+            "single_position": {"max_position": {"name": "NVIDIA", "weight": 0.3333}, "status": "red"},
+            "drift": {"drift": 0.0, "status": "green"},
+            "turnover": {"turnover_ratio": 0.0, "status": "green"},
+            "thesis_deadlines": {"outdated": [], "status": "green"},
+        },
+    }
+
+
+def test_positions_detail_fields_and_limits():
+    """Phase 3: positions_detail traegt pro Position Name/ISIN/Kategorie/Wert/
+    Gewicht/Limit/Status — Limit nur fuer Satellite, Core/Legacy -> None."""
+    analysis = _p3_analysis()
+    package = facts.build_facts_package(
+        _P3_PORTFOLIO, [], analysis, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    detail = package["deterministic_summary"]["positions_detail"]
+    by_isin = {d["isin"]: d for d in detail}
+
+    assert set(by_isin) == {"IE00BKM4GZ66", "US67066G1040", "LU2722255754"}
+    core = by_isin["IE00BKM4GZ66"]
+    assert core["name"] == "iShares Core MSCI EM IMI"
+    assert core["category"] == "core"
+    assert core["value_eur"] == 6000.0
+    assert core["weight"] == 0.6667
+    assert core["limit_pct"] is None  # Core: kein Satellite-Limit -> "--"
+    assert core["status"] == "ok"
+
+    satellite = by_isin["US67066G1040"]
+    assert satellite["category"] == "satellite"
+    assert satellite["value_eur"] == 3000.0
+    assert satellite["limit_pct"] == 10.0  # max_position_pct 10.0%
+    assert satellite["weight"] == 0.3333
+    assert satellite["status"] == "rot"  # 33.3% > 10% Max
+
+    legacy = by_isin["LU2722255754"]
+    assert legacy["category"] == "legacy"
+    assert legacy["value_eur"] == 0.0
+    assert legacy["limit_pct"] is None
+    assert legacy["status"] == "ok"
+
+
+def test_sectors_detail_only_satellite_sectors():
+    """Phase 3: sectors_detail nur Satellite-Sektoren — Core-ETF (Diversified)
+    und unknown/Legacy tauchen NICHT als Sektor auf; Limit max_sector_pct;
+    Status rot nur fuer den max-Sektor."""
+    analysis = _p3_analysis()
+    package = facts.build_facts_package(
+        _P3_PORTFOLIO, [], analysis, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    sectors = package["deterministic_summary"]["sectors_detail"]
+
+    assert [s["name"] for s in sectors] == ["Technology"]  # nur Satellite-Sektor
+    tech = sectors[0]
+    assert tech["value_eur"] == 3000.0  # Ratio 1.0 x Satellite-Summe 3000
+    assert tech["ratio"] == 1.0
+    assert tech["limit_pct"] == 20.0  # max_sector_pct 20.0%
+    assert tech["status"] == "red"  # max-Sektor der roten Sektor-Ampel
+
+
+def test_positions_detail_status_bands_with_target():
+    """Phase 3: Status-Baender — unter Ziel green, zwischen Ziel/Max gelb,
+    ueber Max rot; unbewertet nur bei Gewicht 0 mit Satellite-Limit."""
+    detail = [
+        facts._position_detail_status(0.03, 0.10, 0.05),  # 3% < Ziel 5%
+        facts._position_detail_status(0.07, 0.10, 0.05),  # 7% zwischen Ziel/Max
+        facts._position_detail_status(0.12, 0.10, 0.05),  # 12% > Max 10%
+        facts._position_detail_status(0.0, 0.10, 0.05),  # unbewertet
+        facts._position_detail_status(0.4, None, None),  # Core ohne Limit -> ok
+    ]
+    assert detail == ["gruen", "gelb", "rot", "unbewertet", "ok"]
+
+
+def test_positions_detail_json_serializable_and_deterministic():
+    """Phase 3: positions_detail/sectors_detail sind JSON-serialisierbar und
+    deterministisch (identische Eingaben -> identische Details)."""
+    analysis = _p3_analysis()
+    first = facts.build_facts_package(
+        _P3_PORTFOLIO, [], analysis, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    second = facts.build_facts_package(
+        _P3_PORTFOLIO, [], analysis, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    json.dumps(first)  # serialisierbar
+    assert first["deterministic_summary"]["positions_detail"] == second["deterministic_summary"]["positions_detail"]
+    assert first["deterministic_summary"]["sectors_detail"] == second["deterministic_summary"]["sectors_detail"]
+
+
+def test_positions_detail_empty_checks_fallback_to_holdings():
+    """Phase 3: fehlende analyse-Checks (defensive Mocks) -> positions_detail
+    aus den Holdings; Sektor-Details leer (keine Sektor-Analyse vorhanden)."""
+    package = facts.build_facts_package(
+        _P3_PORTFOLIO, [], {"checks": {}}, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    detail = package["deterministic_summary"]["positions_detail"]
+    assert package["deterministic_summary"]["sectors_detail"] == []
+    assert len(detail) == 3
+    core = next(d for d in detail if d["isin"] == "IE00BKM4GZ66")
+    assert core["category"] == "core"
+    assert core["value_eur"] == 6000.0
+    assert core["limit_pct"] is None
+    satellite = next(d for d in detail if d["isin"] == "US67066G1040")
+    assert satellite["limit_pct"] == 10.0
+    assert satellite["weight"] == 0.0  # keine Gewichte ohne analyse-Checks
+    assert satellite["status"] == "unbewertet"

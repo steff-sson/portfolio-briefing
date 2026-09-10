@@ -84,8 +84,174 @@ def _status_lists(analysis: dict) -> tuple[list[str], list[str], list[str]]:
     return red, yellow, green
 
 
+def _position_limit_pct(position: dict, strategy: dict) -> float | None:
+    """Geltendes Einzelpositions-Limit (Ratio) — nur fuer Satellite.
+
+    Core-/Legacy-/unknown-Positionen haben kein Satellite-Limit -> None
+    (die Briefing-Tabelle zeigt dort ``--`` statt einer Zahl).
+    """
+    if _str(position.get("category")).lower() != "satellite":
+        return None
+    satellite_limits = strategy.get("satellite_limits", {}) if isinstance(strategy, dict) else {}
+    if not isinstance(satellite_limits, dict):
+        return None
+    limit = satellite_limits.get("max_position_pct")
+    if not isinstance(limit, (int, float)) or isinstance(limit, bool):
+        return None
+    return float(limit) / 100.0
+
+
+def _positions_detail(
+    portfolio: dict, analysis: dict, strategy: dict, total_value_eur: float
+) -> list[dict]:
+    """Positions-Details fuer die Briefing-Tabelle — additive, deterministische Fakten.
+
+    Quelle: die bereits berechneten Positionen aus ``analysis["checks"]["positions"]``
+    (Name/ISIN/Kategorie/Wert/Gewicht — nie neu berechnet). ``strategy`` liefert
+    nur das geltende Satellite-Einzelpositionslimit (``max_position_pct``) und die
+    Schwellen fuer den Status. Es entstehen KEINE neuen Finanzberechnungen:
+    fehlt eine Position, fallen name/isin/category/limit/status auf sichere
+    Defaults, value_eur/weight auf 0 zurueck.
+    """
+    positions = _get_check(analysis, "positions", "positions", [])
+    if not isinstance(positions, list):
+        positions = []
+    holdings = portfolio.get("holdings", [])
+    if not isinstance(holdings, list):
+        holdings = []
+    holdings_by_isin = {str(h.get("isin")): h for h in holdings if isinstance(h, dict)}
+    target_ratio = _pct_value(strategy, ("portfolio", "rebalancing", "threshold_pct"))
+
+    detail: list[dict] = []
+    for index, p in enumerate(positions):
+        if not isinstance(p, dict):
+            continue
+        isin = _str(p.get("isin"))
+        holding = holdings_by_isin.get(isin) or {}
+        category = _str(p.get("category") or holding.get("category"))
+        limit_ratio = _position_limit_pct(p, strategy)
+        weight = _float(p.get("weight"))
+        value = _float(p.get("value_eur")) if p.get("value_eur") is not None else _float(
+            holding.get("value_eur")
+        )
+        if weight <= 0 and value > 0 and total_value_eur > 0:
+            weight = round(value / total_value_eur, 4)
+        status = _position_detail_status(weight, limit_ratio, target_ratio)
+        detail.append({
+            "name": _str(p.get("name") or holding.get("name")),
+            "isin": isin,
+            "category": category if category else "unknown",
+            "value_eur": value,
+            "weight": round(weight, 4),
+            "limit_pct": round(limit_ratio * 100, 1) if limit_ratio is not None else None,
+            "status": status,
+        })
+    # Fallback auf Holdings ohne analyse-Positionen (defensive Tests/Dry-Run):
+    # keine Neuberechnung der Gewichte — Kategorie/Name/ISIN/Wert aus den
+    # Holdings, Limit nur fuer Satellite, Status mit Gewicht 0.
+    if not detail:
+        for h in holdings:
+            if not isinstance(h, dict):
+                continue
+            category = _str(h.get("category"))
+            limit_ratio = _position_limit_pct(h, strategy)
+            detail.append({
+                "name": _str(h.get("name")),
+                "isin": _str(h.get("isin")),
+                "category": category if category else "unknown",
+                "value_eur": _float(h.get("value_eur")),
+                "weight": 0.0,
+                "limit_pct": round(limit_ratio * 100, 1) if limit_ratio is not None else None,
+                "status": _position_detail_status(0.0, limit_ratio, target_ratio),
+            })
+    return detail
+
+
+def _sectors_detail(analysis: dict, strategy: dict) -> list[dict]:
+    """Sektor-Details (nur Satellite-Sektoren) — additive, deterministische Fakten.
+
+    Quelle: die bereits berechnete Sektor-Konzentration aus
+    ``analysis["checks"]["sector_concentration"]`` (``sector_ratios`` — nur
+    Satellite-Positionen; Core/Legacy/unknown werden dort nicht als Satellite
+    gewertet, siehe analyze.calculate_sector_concentration). Core-ETFs sind
+    bewusst breit gestreut und erscheinen hier NIE als konzentrierter Sektor.
+    Sektor-Werte: Anteil-Ratio x Satellite-Summenwert (keine neue
+    Finanzberechnung — beide Zahlen sind autoritative Paket-Fakten). Limit
+    ``max_sector_pct`` gilt nur fuer Satellite-Sektoren; Status aus dem
+    bestehenden ``status`` der Sektor-Konzentration (nur bei rot, sonst green).
+    """
+    sector_check = _get_check(analysis, "sector_concentration", "sector_ratios")
+    if not isinstance(sector_check, dict) or not sector_check:
+        return []
+    ratios = sector_check
+    max_sector_pct = _str(_get_check(analysis, "sector_concentration", "max_sector"))
+    overall_status = _get_check(analysis, "sector_concentration", "status")
+    threshold = _pct_value(strategy, ("satellite_limits", "max_sector_pct"))
+    # Satellite-Summenwert aus den analysierten Positionen (autoritativ, nur
+    # Satellite — identisch zur Sektor-Ratio-Berechnungsbasis in analyze).
+    positions = _get_check(analysis, "positions", "positions", [])
+    if not isinstance(positions, list):
+        positions = []
+    satellite_value = sum(
+        _float(p.get("value_eur"))
+        for p in positions
+        if isinstance(p, dict) and _str(p.get("category")).lower() == "satellite"
+    )
+    entries: list[dict] = []
+    for sector, ratio in ratios.items():
+        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+            continue
+        sector_status = "green"
+        if overall_status == "red" and _str(sector) == max_sector_pct:
+            sector_status = "red"
+        entries.append({
+            "name": _str(sector),
+            "value_eur": round(_float(ratio) * satellite_value, 2),
+            "ratio": round(_float(ratio), 4),
+            "limit_pct": round(threshold * 100, 1) if threshold is not None else None,
+            "status": sector_status,
+        })
+    entries.sort(key=lambda e: (-e["ratio"], e["name"]))
+    return entries
+
+
+def _position_detail_status(weight: float, limit_ratio: float | None, target_ratio: float | None) -> str:
+    """Status einer Position: unter Ziel green, zwischen Ziel/Max yellow, ueber Max red.
+
+    Nur Satellite hat ein Limit (limit_ratio != None): Status wird gegen Ziel
+    (target_position_pct, sonst 50% des Limits) und Maximum bewertet. Ohne
+    Limit (Core/Legacy/unknown) -> "ok" (keine Grenzverletzung moeglich).
+    """
+    if limit_ratio is None:
+        return "ok"
+    if weight <= 0:
+        return "unbewertet"
+    target = target_ratio if target_ratio is not None else limit_ratio * 0.5
+    if weight > limit_ratio:
+        return "rot"
+    if weight > target:
+        return "gelb"
+    return "gruen"
+
+
+def _pct_value(strategy: dict, path: tuple[str, ...]) -> float | None:
+    """Prozentwert (75.0 = 75%) aus einer Strategy-Pfad-Kette -> Ratio.
+
+    Löst ``strategy[path[0]][path[1]]...`` auf; nur numerische Werte werden
+    umgerechnet (fehlend/ungueltig -> None, nie 0.0 erfunden).
+    """
+    value: object = strategy if isinstance(strategy, dict) else {}
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) / 100.0
+
+
 def _deterministic_summary(
-    portfolio: dict, analysis: dict, data_quality: dict | None = None
+    portfolio: dict, analysis: dict, data_quality: dict | None = None, strategy: dict | None = None
 ) -> dict:
     """Extract the numbers the LLM may reference — all from analysis["checks"].
 
@@ -118,10 +284,12 @@ def _deterministic_summary(
         red_checks = ["data_quality"]
         yellow_checks = []
 
+    total_value_eur = _float(
+        _get_check(analysis, "positions", "total_value_eur", portfolio.get("total_value_eur"))
+    )
+
     return {
-        "total_value_eur": _float(
-            _get_check(analysis, "positions", "total_value_eur", portfolio.get("total_value_eur"))
-        ),
+        "total_value_eur": total_value_eur,
         "position_count": position_count,
         "core_ratio": _float(_get_check(analysis, "core_satellite", "core_ratio")),
         "max_position_weight": max_position_weight,
@@ -136,6 +304,11 @@ def _deterministic_summary(
         "green_checks": green_checks,
         "data_quality_status": dq_status,
         "data_quality_issues": dq_issues,
+        # Phase 3 (Plan §3.2): Positions-/Sektor-Details — additive Fakten
+        # aus den bereits berechneten analyze-Checks (keine neuen
+        # Finanzberechnungen ausserhalb autoritativer Fakten).
+        "positions_detail": _positions_detail(portfolio, analysis, strategy or {}, total_value_eur),
+        "sectors_detail": _sectors_detail(analysis, strategy or {}),
     }
 
 
@@ -379,7 +552,7 @@ def build_facts_package(
     Ohne Argument (None) bleibt das Paket strukturell unveraendert
     (rueckwaertskompatibel).
     """
-    summary = _deterministic_summary(portfolio, analysis, data_quality)
+    summary = _deterministic_summary(portfolio, analysis, data_quality, strategy)
     strategy_diff = changes.get("strategy") if isinstance(changes, dict) else None
     # Briefing-Schnittstelle (Plan §6a): Ampel (7 Kategorien), Gesamt-Empfehlung
     # und Top-3-Positionsvorschlaege — deterministisch aus analyze abgeleitet.
