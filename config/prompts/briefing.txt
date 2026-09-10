@@ -21,10 +21,10 @@ OUTPUT-FORM (zwingend, gilt für das GESAMTE Briefing):
 - Reiner Text. KEINE Markdown-Tabellen und keine Pipe-Zeichen ("|"), keine Tabellen-Kopf-/Trennzeilen, keine Sternchen für Fett/Kursiv ("**", "*", "__"), keine Aufzählungszeichen außer "- " am Zeilenanfang, keine Emoji- oder Status-Symbole, keine horizontalen Linien.
 - Ampel-Status einheitlich als Klammer-Label am Zeilenanfang nennen: [GRÜN], [GELB] oder [ROT] — kein Emoji, kein Statuswort. Ein Status "ok" wird als [GRÜN] dargestellt, niemals als Wort "ok".
 - Den Gesamtstatus prominent als [GRÜN]/[GELB]/[ROT] in die ERSTE Zeile der Kurzlage setzen.
-- Leerzeilen zwischen allen Stichpunkten/Bullets sowie vor und nach jeder Sektions-Überschrift setzen. "Einwand" und "Grund" stehen jeweils als eigene Zeile mit Abstand.
+- Leerzeilen-Regel (zwingend, vor Auslieferung prüfen): Zwischen zwei aufeinanderfolgenden Stichpunkten/-Zeilen MUSS eine Leerzeile stehen — nicht nur um Sektions-Überschriften. Auch vor und nach jeder Sektions-Überschrift steht eine Leerzeile (Leerzeilen zwischen allen Stichpunkten/Bullets). "Einwand" und "Grund" stehen jeweils als eigene Zeile mit vorheriger Leerzeile.
 - Lange Absätze (z. B. Datenqualität) in 2–3 kurze Absätze aufteilen. Den Fundamentaldaten-Disclaimer aus dem bulletteten Fließtext auslagern und als eigenen Absatz setzen.
 - Die 6 Sektions-Überschriften (## ...) bleiben exakt erhalten.
-- Zielumfang 400–450 Wörter. Jede Kernaussage nur einmal: Core-/Satellite-Abweichung, Einzelpositions-Band und Disclaimer je höchstens 1×; Sell-/Reduce- und Nächster-Schritt-Hinweise nicht dreifach wiederholen.
+- Wortbudget (zwingend, vor Auslieferung prüfen): Zielumfang 400–450 Wörter. Beim Draft die Wörter ZÄHLEN und so lange kürzen, bis das Briefing unter 450 Wörtern liegt (Annäherung an 400). Jede Aussage nur einmal: Core-/Satellite-Abweichung, Einzelpositions-Band und Disclaimer je höchstens 1×; Sell-/Reduce- und Nächster-Schritt-Hinweise nicht dreifach wiederholen. Überflüssige Füll-Phrasen und wiederholte Erläuterungen streichen — keine Aussage in zwei Sektionen erneut erklären.
 - Keine komplizierten Daten: Zahlen nur dort, wo sie ein Argument stützen. Dieselbe Zahl nicht mehrfach wiederholen.
 
 INHALT DER SEKTIONEN (die 6 Überschriften bleiben; Inhalt kompakt, laienverständlich, portfolio-spezifisch):

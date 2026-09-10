@@ -701,6 +701,62 @@ def test_revise_prompt_ampel_labels_blank_lines_and_shortening():
     assert "keine vollständige ISIN-Liste" in revise
 
 
+def test_briefing_prompt_sharpens_word_count_and_blank_lines():
+    """Option A: briefing.txt macht Wortbudget und Leerzeilen zur zwingenden
+    Vor-Auslieferungs-Pruefung — Woerter ZAEHLEN und unter 450 kuerzen, jede
+    Aussage nur einmal, Fuell-Phrasen streichen; zwischen zwei
+    aufeinanderfolgenden Stichpunkten/-Zeilen MUSS eine Leerzeile stehen
+    (nicht nur um Sektions-Headers), Einwand/Grund als eigene Zeile mit
+    vorheriger Leerzeile. KEIN Verify-Gate — reine Prompt-Verschaerfung."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+
+    # Wortbudget: zwingend vor Auslieferung, zaehlen und unter 450 kuerzen.
+    assert "Wortbudget (zwingend, vor Auslieferung prüfen)" in content
+    assert "Beim Draft die Wörter ZÄHLEN" in content
+    assert "bis das Briefing unter 450 Wörtern liegt" in content
+    assert "Jede Aussage nur einmal" in content
+    assert "Überflüssige Füll-Phrasen und wiederholte Erläuterungen streichen" in content
+    assert "keine Aussage in zwei Sektionen erneut erklären" in content
+
+    # Leerzeilen: ausdruecklich zwischen zwei aufeinanderfolgenden Zeilen,
+    # nicht nur um Sektions-Header; Einwand/Grund mit vorheriger Leerzeile.
+    assert "Leerzeilen-Regel (zwingend, vor Auslieferung prüfen)" in content
+    assert (
+        "Zwischen zwei aufeinanderfolgenden Stichpunkten/-Zeilen MUSS eine Leerzeile stehen"
+        in content
+    )
+    assert "nicht nur um Sektions-Überschriften" in content
+    assert "mit vorheriger Leerzeile" in content
+    # Bestehende Format-Marker bleiben erhalten (kein Rueckbau).
+    assert "Leerzeilen zwischen allen Stichpunkten" in content
+    assert "400–450 Wörter" in content
+    assert "nicht dreifach wiederholen" in content
+
+
+def test_revise_prompt_sharpens_word_count_and_blank_lines():
+    """Option A: revise.txt traegt dieselbe Verschaerfung (Wortbudget zwingend,
+    Woerter zaehlen und unter 450 kuerzen, Fuell-Phrasen streichen; Leerzeile
+    zwischen zwei aufeinanderfolgenden Stichpunkten/-Zeilen MUSS stehen,
+    Einwand/Grund mit vorheriger Leerzeile) — kein neues Verify-Gate."""
+    revise = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
+
+    assert "Wortbudget (zwingend, vor Auslieferung prüfen)" in revise
+    assert "beim Korrigieren die Wörter ZÄHLEN" in revise
+    assert "das Briefing unter 450 Wörtern liegt" in revise
+    assert "Füll-Phrasen und wiederholte Erläuterungen streichen" in revise
+    assert "Leerzeilen-Regel" in revise
+    assert "(zwingend, vor Auslieferung prüfen)" in revise
+    assert (
+        "Zwischen zwei aufeinanderfolgenden Stichpunkten/-Zeilen MUSS eine Leerzeile stehen"
+        in revise
+    )
+    assert "nicht nur um Sektions-Überschriften" in revise
+    assert "mit vorheriger Leerzeile" in revise
+    # Bestehende Marker bleiben erhalten.
+    assert "Leerzeilen zwischen" in revise
+    assert "400–450" in revise
+
+
 def test_briefing_prompt_option2_watchlist_observation_contract():
     """Option 2 (Laiensicht): Watchlist-Kandidaten nur als Beobachtung/Review,
     ohne Kauf-Empfehlung/Gewinn-/Kursprognose, keine Markt-Timing-/
