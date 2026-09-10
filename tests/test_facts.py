@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-from scripts import analyze, facts
+from scripts import analyze, facts, verify
 
 
 def _analysis_fixture() -> dict:
@@ -117,7 +117,8 @@ def test_empty_news(portfolio, transactions):
     assert package["news"] == []
     assert package["meta"]["mode"] == "friday"
     assert set(package["deterministic_summary"]) == {
-        "total_value_eur", "position_count", "core_ratio", "max_position_weight", "max_position_name",
+        "total_value_eur", "position_count", "core_ratio", "satellite_ratio",
+        "max_position_weight", "max_position_name",
         "max_sector", "max_sector_ratio", "drift", "turnover_ratio", "outdated_theses",
         "red_checks", "yellow_checks", "green_checks",
         "data_quality_status", "data_quality_issues", "has_triggers",
@@ -970,3 +971,69 @@ def test_positions_detail_empty_checks_fallback_to_holdings():
     assert satellite["limit_pct"] == 10.0
     assert satellite["weight"] == 0.0  # keine Gewichte ohne analyse-Checks
     assert satellite["status"] == "unbewertet"
+
+
+def test_satellite_ratio_from_authoritative_facts_not_target():
+    """P0: Der Satellite-IST-Anteil kommt aus den autoritativen Werten
+    (Summe der Satellite-Werte / Gesamtwert) — NIEMALS aus dem Strategie-Ziel
+    (portfolio.satellite_pct)."""
+    strategy = {
+        "portfolio": {"core_pct": 70.0, "satellite_pct": 30.0, "rebalancing": {"threshold_pct": 5.0}},
+        "satellite_limits": {"max_position_pct": 10.0, "max_sector_pct": 20.0},
+    }
+    analysis = {
+        "checks": {
+            "positions": {
+                "total_value_eur": 10000.0,
+                "positions": [
+                    {"isin": "DE0000000001", "name": "Core", "category": "core", "value_eur": 8810.0, "weight": 0.881},
+                    {"isin": "DE0000000002", "name": "Sat", "category": "satellite", "value_eur": 1190.0, "weight": 0.119},
+                ],
+            },
+            "core_satellite": {"core_ratio": 0.881, "satellite_ratio": 0.119, "status": "red"},
+        },
+    }
+    package = facts.build_facts_package(
+        {"holdings": []}, [], analysis, news=[], strategy=strategy, mode="monday"
+    )
+    summary = package["deterministic_summary"]
+    assert summary["satellite_ratio"] == 0.119  # 100 - 88.1% Core
+    assert summary["satellite_ratio"] != strategy["portfolio"]["satellite_pct"] / 100.0
+    # Der Zielwert bleibt als Ziel erhalten (nicht als Ist-Wert).
+    assert package["strategy_thresholds_pct"]["satellite_pct"] == 30.0
+    # Der IST-Wert ist eine erlaubte Prozentzahl (verify-Allowlist).
+    assert 11.9 in verify.build_allowed_numbers(package)
+
+
+def test_satellite_ratio_derived_from_core_ratio_when_missing():
+    """P0-Fallback: Fehlt satellite_ratio (aeltere/defensive Analyse), wird er
+    aus 100 - core_ratio abgeleitet — nie aus dem Strategie-Zielwert."""
+    analysis = {
+        "checks": {
+            "positions": {"total_value_eur": 10000.0, "positions": []},
+            "core_satellite": {"core_ratio": 0.881, "status": "red"},
+        },
+    }
+    package = facts.build_facts_package(
+        {"holdings": []}, [], analysis, news=[], strategy={}, mode="monday"
+    )
+    assert package["deterministic_summary"]["satellite_ratio"] == 0.119
+
+
+def test_satellite_ratio_zero_without_core_ratio():
+    """Defensive Defaults: ohne core_ratio wird keine Satellite-Quote erfunden (0.0)."""
+    package = facts.build_facts_package(
+        {"holdings": []}, [], {"checks": {}}, news=[], strategy={}, mode="monday"
+    )
+    assert package["deterministic_summary"]["satellite_ratio"] == 0.0
+
+
+def test_sectors_detail_scope_marks_satellite_relativization():
+    """P0: Sektor-Anteile sind relativ zum SATELLITE-Umfang (scope=satellite),
+    damit z.B. 'Unknown 100%' nie als Gesamtportfolio-Konzentration wirkt."""
+    analysis = _p3_analysis()
+    package = facts.build_facts_package(
+        _P3_PORTFOLIO, [], analysis, news=[], strategy=_P3_STRATEGY, mode="monday"
+    )
+    sectors = package["deterministic_summary"]["sectors_detail"]
+    assert sectors and all(s["scope"] == "satellite" for s in sectors)

@@ -463,22 +463,26 @@ def _verify_signal_sections(facts_package: dict, text: str, findings: list[dict]
                     f"Sektion {section} als eigene Markdown-Ueberschrift ergaenzen",
                 )
             )
-    # Fundamentaldaten-Disclaimer nur in den Signal-Sektionen (nicht naechster
-    # Schritt) — case-insensitive geprueft (Umlaute, Gross-/Kleinschreibung).
-    # Der Renderer haengt den Disclaimer ohne nachfolgenden Punkt an die
-    # Signal-Zeilen an; die Pruefung bleibt ein Substring-Match.
+    # Fundamentaldaten-Disclaimer: der Hinweis gilt fuer ALLE Signal-
+    # Sektionen und wird deshalb nur EINMAL im Briefing erwartet (Duplikate
+    # sind unerwuenscht). Fail-closed: fehlt der Hinweis in beiden
+    # Signal-Sektionen komplett, blockt das wie bisher. Der Renderer haengt
+    # den Disclaimer ohne nachfolgenden Punkt an die Signal-Zeilen an; die
+    # Pruefung bleibt ein Substring-Match (case-insensitive).
     disclaimer_lower = FUNDAMENTALS_DISCLAIMER.lower()
-    for section in (SELL_SIGNALS_SECTION, WATCHLIST_SIGNALS_SECTION):
-        content = _section_content(_extract_section(text, section)) or ""
-        if disclaimer_lower not in content.lower():
-            findings.append(
-                _finding(
-                    "critical",
-                    f"Fundamentaldaten-Disclaimer fehlt in {section}",
-                    "Signal-Sektion ohne Hinweis auf fehlende Fundamentaldaten",
-                    "Hinweis ergaenzen: Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) sind nicht automatisch verfügbar und fließen nicht in das Signal ein",
-                )
+    signal_content = "".join(
+        _section_content(_extract_section(text, section)) or ""
+        for section in (SELL_SIGNALS_SECTION, WATCHLIST_SIGNALS_SECTION)
+    )
+    if disclaimer_lower not in signal_content.lower():
+        findings.append(
+            _finding(
+                "critical",
+                "Fundamentaldaten-Disclaimer fehlt in den Signal-Sektionen",
+                "Keine Signal-Sektion ohne Hinweis auf fehlende Fundamentaldaten",
+                "Hinweis einmal ergaenzen: Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) sind nicht automatisch verfügbar und fließen nicht in das Signal ein",
             )
+        )
 
 
 def _extract_numbers(text: str) -> list[float]:
@@ -612,7 +616,7 @@ def _portfolio_name_words(holdings: list) -> set[str]:
 def _summary_numbers_pct(summary: dict) -> list[float]:
     """All percentage-representable numbers of deterministic_summary (as %)."""
     values: list[float] = []
-    for key in ("core_ratio", "max_position_weight", "max_sector_ratio", "drift", "turnover_ratio"):
+    for key in ("core_ratio", "satellite_ratio", "max_position_weight", "max_sector_ratio", "drift", "turnover_ratio"):
         value = summary.get(key)
         if isinstance(value, (int, float)):
             values.append(round(value * 100, 1))
@@ -809,6 +813,96 @@ def _forbidden_style_terms(text: str) -> list[str]:
         if match:
             found.append(match.group(0))
     return found
+
+
+# Reiner-Text-Contract (Laiensicht): das Briefing enthaelt KEINE Markdown-
+# Tabellen, keine Fett-/Kursiv-Sterne, keine Stern-Bullets, keine Kopf-/
+# Trennzeilen und keine Emoji-Statuszeichen. Erlaubt bleiben die
+# Pflicht-Ueberschriften (^## ...$) und "- "-artige Aufzaehlungszeilen.
+# (Die Ueberschriften selbst sind Teil des 6-Sektionen-Contracts.)
+_MARKDOWN_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_MARKDOWN_RULE_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$", re.MULTILINE)
+_MARKDOWN_BOLD_RE = re.compile(r"(\*\*|__)")
+_MARKDOWN_STAR_BULLET_RE = re.compile(r"^\s*[*+]\s+", re.MULTILINE)
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\uFE0F]"
+)
+
+
+def _plain_text_violations(text: str) -> list[str]:
+    """Markdown-/Tabellen-/Emoji-Marker im reinen-Text-Briefing (Laiensicht).
+
+    Erkennt deterministisch: Markdown-Tabellenzeilen, Trenn-/Kopfzeilen,
+    Fett-/Kursiv-Sterne, Stern-Bullets und Emoji-Statuszeichen. Die
+    Pflicht-Ueberschriften (``## ...``) und ``- ``-Zeilen sind ausdruecklich
+    erlaubt und werden NICHT gemeldet.
+    """
+    violations: list[str] = []
+    if _MARKDOWN_TABLE_RE.search(text):
+        violations.append("Markdown-Tabelle")
+    if _MARKDOWN_RULE_RE.search(text):
+        violations.append("Trenn-/Kopfzeile")
+    if _MARKDOWN_BOLD_RE.search(text):
+        violations.append("Fett-/Kursiv-Sternchen")
+    if _MARKDOWN_STAR_BULLET_RE.search(text):
+        violations.append("Stern-Bullet")
+    if _EMOJI_RE.search(text):
+        violations.append("Emoji-Statuszeichen")
+    return violations
+
+
+# Option-2-Contract (Laiensicht): aus Kursen/News/Fit laesst sich keine
+# belastbare Gewinn-/Kursprognose ableiten. Explizite Prognose-/Versprechens-
+# Formulierungen blocken als major (fail-closed). Eine Verneinung im selben
+# Satz ("keine Gewinnprognose", "ohne Kursziel") ist die gewuenschte
+# Klarstellung und blockt NICHT.
+_FORECAST_PROMISE_TERMS = (
+    "kursziel",
+    "kursprognose",
+    "gewinnprognose",
+    "renditeprognose",
+    "renditeversprechen",
+    "garantierte rendite",
+    "garantierter gewinn",
+    "sichere rendite",
+    "sicherer gewinn",
+    "wird steigen",
+    "wird fallen",
+    "markt-timing",
+    "markttiming",
+)
+
+
+def _forecast_promise_violations(text: str) -> list[str]:
+    """Prognose-/Versprechens-Formulierungen im Briefing (Option-2-Contract).
+
+    Erkennt explizite Gewinn-/Kursprognosen, Kursziele und Markt-Timing-/
+    Rendite-Versprechen (case-insensitive, Wortgrenze). Steht im selben Satz
+    vor dem Treffer eine Verneinung (kein/keine/ohne/nicht), ist das die
+    ausdruecklich gewuenschte Option-2-Klarstellung und wird nicht gemeldet.
+    """
+    violations: list[str] = []
+    if not text:
+        return violations
+    for term in _FORECAST_PROMISE_TERMS:
+        for match in re.finditer(rf"(?i)\b{re.escape(term)}\b", text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end == -1:
+                line_end = len(text)
+            offset = match.start() - line_start
+            prefix = text[line_start:match.start()]
+            seg_start = max(
+                prefix.rfind(".", 0, offset),
+                prefix.rfind("!", 0, offset),
+                prefix.rfind("?", 0, offset),
+                prefix.rfind(";", 0, offset),
+            )
+            sentence = text[line_start + seg_start + 1 : line_end]
+            if re.search(r"\b(kein(e|en|er|es)?|ohne|nicht)\b", sentence, re.IGNORECASE):
+                continue
+            violations.append(match.group(0))
+    return violations
 
 
 def _extract_section(text: str, heading: str) -> str | None:
@@ -1156,6 +1250,31 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 f"Verbotener Stil-Begriff '{token}' im Briefing",
                 f"Draft enthaelt '{token}'",
                 "Durch verstaendliche deutsche Formulierung ersetzen (z.B. 'aktuelle Ausbaustufe' statt 'MVP')",
+            )
+        )
+    # 3a. Reiner-Text-Contract (Laiensicht): keine Markdown-Tabellen,
+    #     Fett-/Kursiv-Sternchen, Stern-Bullets, Trenn-/Kopfzeilen oder
+    #     Emoji-Statuszeichen. Pflicht-Ueberschriften und "- "-Zeilen bleiben
+    #     erlaubt.
+    for violation in _plain_text_violations(text):
+        findings.append(
+            _finding(
+                "major",
+                f"Markdown-/Tabellen-Marker im Briefing ({violation})",
+                f"Draft enthaelt {violation}",
+                "Reinen Text ohne Tabellen/Sternchen/Emoji verwenden; Status als Wort (gruen/gelb/rot), Listen als '- '-Zeilen",
+            )
+        )
+    # 3b. Option-2-Contract (Laiensicht): keine Gewinn-/Kursprognose, kein
+    #     Kursziel, kein Markt-Timing-/Rendite-Versprechen. Verneinte
+    #     Klarstellungen ("keine Gewinnprognose") bleiben erlaubt.
+    for violation in _forecast_promise_violations(text):
+        findings.append(
+            _finding(
+                "major",
+                f"Prognose-/Versprechens-Formulierung im Briefing ('{violation}')",
+                f"Draft enthaelt '{violation}'",
+                "Keine Gewinn-/Kursprognose, kein Kursziel, kein Markt-Timing-/Rendite-Versprechen; Watchlist-Kandidaten nur als Beobachtung/Review (keine Kauf-Empfehlung)",
             )
         )
 

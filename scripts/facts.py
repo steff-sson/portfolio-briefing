@@ -208,6 +208,10 @@ def _sectors_detail(analysis: dict, strategy: dict) -> list[dict]:
             "name": _str(sector),
             "value_eur": round(_float(ratio) * satellite_value, 2),
             "ratio": round(_float(ratio), 4),
+            # Der Anteil ist relativ zum SATELLITE-Umfang (nicht zum
+            # Gesamtportfolio) — maschinenlesbarer Hinweis fuer Prompt/Renderer,
+            # damit "Unknown 100%" nie als Gesamtportfolio-Konzentration wirkt.
+            "scope": "satellite",
             "limit_pct": round(threshold * 100, 1) if threshold is not None else None,
             "status": sector_status,
         })
@@ -288,10 +292,27 @@ def _deterministic_summary(
         _get_check(analysis, "positions", "total_value_eur", portfolio.get("total_value_eur"))
     )
 
+    # Ist-Satellite-Anteil: bevorzugt der autoritativ in analyze berechnete
+    # satellite_ratio (Summe der Satellite-Werte / Gesamtwert). Fehlt er
+    # (aeltere/defensive Analyse-Mocks mit nur core_ratio), wird er aus
+    # 100 - core_ratio abgeleitet — NIE aus dem Strategie-Zielwert
+    # (portfolio.satellite_pct). Ohne core_ratio bleibt der Wert 0.0
+    # (fail-closed, keine erfundene Quote).
+    satellite_ratio_raw = _get_check(analysis, "core_satellite", "satellite_ratio")
+    if isinstance(satellite_ratio_raw, (int, float)) and not isinstance(satellite_ratio_raw, bool):
+        satellite_ratio = _float(satellite_ratio_raw)
+    else:
+        core_ratio_raw = _get_check(analysis, "core_satellite", "core_ratio")
+        if isinstance(core_ratio_raw, (int, float)) and not isinstance(core_ratio_raw, bool):
+            satellite_ratio = 1.0 - _float(core_ratio_raw)
+        else:
+            satellite_ratio = 0.0
+
     return {
         "total_value_eur": total_value_eur,
         "position_count": position_count,
         "core_ratio": _float(_get_check(analysis, "core_satellite", "core_ratio")),
+        "satellite_ratio": round(satellite_ratio, 4),
         "max_position_weight": max_position_weight,
         "max_position_name": max_position_name,
         "max_sector": _str(_get_check(analysis, "sector_concentration", "max_sector")),

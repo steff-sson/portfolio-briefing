@@ -898,6 +898,115 @@ class TestStyleGates:
         assert VALID_FACTS == facts_before
 
 
+class TestPlainTextOutput:
+    """Reiner-Text-Contract (Laiensicht): Tabellen/Markdown-/Emoji-Marker
+    blocken als major; Pflicht-Ueberschriften und "- "-Zeilen bleiben erlaubt.
+    Der Fundamentaldaten-Disclaimer ist genau einmal ausreichend (kein Duplikat)."""
+
+    def _draft_with(self, addition: str) -> str:
+        return VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            f"Apple (AAPL, US0378331005) bei 24.8%. {addition}",
+        )
+
+    @pytest.mark.parametrize(
+        ("addition", "label"),
+        [
+            ("| Name | Wert |\n|---|---|", "Tabelle"),
+            ("**Wichtiger Hinweis**", "Fett"),
+            ("\n* Punkt eins", "Bullet"),
+            ("🔴 Roter Punkt", "Emoji"),
+        ],
+    )
+    def test_markdown_marker_is_major_and_blocks(self, addition, label):
+        findings = verify.verify_draft(VALID_FACTS, self._draft_with(addition))
+        assert any(
+            f["severity"] == "major" and "Markdown-/Tabellen-Marker" in f["issue"]
+            for f in findings
+        )
+        assert verify.final_gate(findings).allow_send is False
+
+    def test_plain_bullets_and_section_headings_pass(self):
+        """'- '-Zeilen und die Pflicht-Ueberschriften sind kein Verstoss."""
+        draft = self._draft_with("- Ein normaler Aufzaehlungspunkt.")
+        assert verify.verify_draft(VALID_FACTS, draft) == []
+
+    def test_disclaimer_once_is_sufficient(self):
+        """Ein einziger Disclaimer (Sell-Sektion) genuegt — Watchlist darf leer sein."""
+        draft = (
+            "## Kurzlage\n"
+            "Apple (AAPL, US0378331005) bei 24.8%.\n\n"
+            "## Datenqualität\nDatenqualität: ok\n\n"
+            "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar und fließen nicht in das Signal ein.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\n"
+            "WATCH — kein Handlungsbedarf."
+        )
+        assert verify.verify_draft(VALID_FACTS, draft) == []
+
+    def test_disclaimer_missing_everywhere_is_critical(self):
+        """Fehlt der Disclaimer in beiden Signal-Sektionen komplett -> critical."""
+        draft = (
+            "## Kurzlage\n"
+            "Apple (AAPL, US0378331005) bei 24.8%.\n\n"
+            "## Datenqualität\nDatenqualität: ok\n\n"
+            "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+            "Keine Sell-/Reduce-Signale.\n\n"
+            "## Watchlist-Signale\n"
+            "Keine Watchlist-Signale.\n\n"
+            "## Nächster Schritt\n"
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.\n\n"
+            "## Empfehlung\n"
+            "WATCH — kein Handlungsbedarf."
+        )
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert any(f["severity"] == "critical" and "Fundamentaldaten-Disclaimer" in f["issue"] for f in findings)
+
+
+class TestOption2ForecastGate:
+    """Option-2-Contract: keine Gewinn-/Kursprognose, kein Kursziel, kein
+    Markt-Timing-/Rendite-Versprechen (major, fail-closed). Verneinte
+    Klarstellungen ("keine Gewinnprognose") bleiben erlaubt."""
+
+    def _in_watchlist(self, addition: str) -> str:
+        return VALID_DRAFT.replace(
+            "Keine Watchlist-Signale.",
+            f"Keine Watchlist-Signale. {addition}",
+        )
+
+    @pytest.mark.parametrize(
+        "addition",
+        [
+            "Kursziel 150 EUR.",
+            "Wir erwarten eine Gewinnprognose mit hohem Wachstum.",
+            "Der Kurs wird steigen.",
+            "Das ist ein sicheres Markt-Timing.",
+            "Hier gibt es garantierte Rendite.",
+        ],
+    )
+    def test_positive_forecast_promise_blocks(self, addition):
+        findings = verify.verify_draft(VALID_FACTS, self._in_watchlist(addition))
+        assert any(
+            f["severity"] == "major" and "Prognose-/Versprechens-Formulierung" in f["issue"]
+            for f in findings
+        )
+        assert verify.final_gate(findings).allow_send is False
+
+    def test_negated_observation_clarification_is_allowed(self):
+        addition = (
+            "Aus den vorliegenden Daten lässt sich keine belastbare Gewinn- oder "
+            "Kurs-Prognose ableiten; das ist keine Kauf-Empfehlung und keine "
+            "Gewinnprognose."
+        )
+        findings = verify.verify_draft(VALID_FACTS, self._in_watchlist(addition))
+        assert findings == []
+
+
 class TestOptionContract:
     """Optionen-Contract (Plan Phase 2.4/2.8): Optionen nur bei deterministischen
     Triggern, pro Option Begruendung + Gegenargument/Risiko; imperative

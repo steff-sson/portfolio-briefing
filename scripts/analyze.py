@@ -612,6 +612,9 @@ def calculate_core_satellite(positions: list, strategy: dict) -> dict:
     core_pct ± rebalancing.threshold_pct. Fehlende Werte ergeben das Band
     0..0 -> jeder positive Ratio ist red (fail-closed).
 
+    ``satellite_ratio`` ist der IST-Anteil (satellite_value_eur / Gesamtwert)
+    — niemals der Strategie-Zielwert ``portfolio.satellite_pct``.
+
     Kategorie je Position: Strategie-Klassifikation (confirmed) -> Rohdaten-
     category -> etf_lookup (siehe _holding_category).
     """
@@ -619,6 +622,10 @@ def calculate_core_satellite(positions: list, strategy: dict) -> dict:
     core_value = sum(p["value_eur"] for p in positions if _holding_category(p, strategy) == "core")
     satellite_value = sum(p["value_eur"] for p in positions if _holding_category(p, strategy) == "satellite")
     ratio = core_value / total if total else 0
+    # Ist-Satellite-Anteil aus den autoritativen Werten (Summe der Satellite-
+    # Werte / Gesamtwert) — NIE aus dem Strategie-Zielwert (portfolio.
+    # satellite_pct). Der Zielwert ist ein Planwert, kein Ist-Wert.
+    satellite_ratio = satellite_value / total if total else 0
     target = _pct(_portfolio_cfg(strategy).get("core_pct"))
     threshold = _pct(_rebalancing_cfg(strategy).get("threshold_pct"))
     return {
@@ -626,6 +633,7 @@ def calculate_core_satellite(positions: list, strategy: dict) -> dict:
         "satellite_value_eur": satellite_value,
         "unknown_value_eur": round(total - core_value - satellite_value, 2),
         "core_ratio": round(ratio, 4),
+        "satellite_ratio": round(satellite_ratio, 4),
         "target_ratio": target,
         "status": _status(ratio, target - threshold, target + threshold),
     }
@@ -1052,7 +1060,7 @@ _ACTION_CATEGORIES = {
 # verify-Allowlist (Zahlen duerfen nur 1:1 aus deterministic_summary kommen).
 _ACTION_COUNTER_ARGUMENTS = {
     "aufstocken": "Bei fallenden Kursen vergrößert sich die Position vorübergehend.",
-    "reduzieren": "Eine Kurserholung kann das Aufwärtspotenzial der reduzierten Position erhöhen.",
+    "reduzieren": "Steigt der Kurs später wieder, verpasst man einen Teil der möglichen Erholung.",
     "verkaufen": "Ein späterer Wiedereinstieg kann höhere Kosten verursachen.",
 }
 

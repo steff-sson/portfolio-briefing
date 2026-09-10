@@ -87,6 +87,21 @@ _FUNDAMENTALS_NOTE = (
     "nicht automatisch verfügbar und fließen nicht in das Signal ein."
 )
 
+# Option-2-Klarstellung (Laiensicht): Watchlist-Kandidaten sind nur
+# Beobachtung/Review. Aus den vorliegenden Daten (Kurse, News, Fit) laesst
+# sich keine belastbare Gewinn-/Kurs-Prognose ableiten; fuer eine fundierte
+# Kauf-/Verkaufsentscheidung fehlen Fundamentaldaten. Die Formulierung nutzt
+# bewusst "Gewinn- oder Kurs-Prognose" (Bindestrich), damit die reine
+# Prognose-Aussage nicht als Prognose-Versprechen missverstanden wird.
+_WATCHLIST_OBSERVATION_NOTE = (
+    "Beobachtung/Review: Diese Watchlist-Kandidaten sind ausschließlich "
+    "Beobachtung und Review (Strategie-Fit, Portfolio-Fit, News). Aus den "
+    "vorliegenden Daten (Kurse, News, Fit) lässt sich keine belastbare Gewinn- "
+    "oder Kurs-Prognose ableiten; für eine fundierte Kauf-/Verkaufsentscheidung "
+    "wären Fundamentaldaten (Umsatz, Gewinn, Bewertung) nötig, die aktuell nicht "
+    "vorliegen. Das ist keine Kauf-Empfehlung und keine Gewinn-Prognose."
+)
+
 # Signale, die eine akute Handlungsadresse erzeugen (identisch zur
 # no-action-Regel in verify).
 _ACUTE_SIGNAL_LABELS = ("SELL", "REDUCE", "BUY")
@@ -151,13 +166,24 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
     lights = lights if isinstance(lights, dict) else {}
     lines: list[str] = [FALLBACK_MARKER + ". Deterministisch aus autoritativen Fakten; Status unverändert."]
 
+    # Direkte Ein-Satz-Zusammenfassung VOR allen Aufzaehlungspunkten
+    # (1:1 aus deterministic_summary.recommendation, keine neuen Fakten).
+    rec = summary.get("recommendation")
+    if isinstance(rec, dict) and rec.get("label") in verify.RECOMMENDATION_LABELS:
+        reason = rec.get("reason")
+        reason_txt = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
+        lines.append(f"Gesamturteil: {rec['label']}.{reason_txt}")
+    else:
+        lines.append("Gesamturteil: keine deterministische Empfehlung (Analyse-Daten fehlen).")
+
     total = summary.get("total_value_eur")
     if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
         count = summary.get("position_count")
         count_txt = f", {int(count)} Positionen" if isinstance(count, (int, float)) else ""
-        lines.append(f"Gesamtwert: {_eur(total)}{count_txt}")
+        lines.append(f"Gesamtwert: {_eur(total)}{count_txt}.")
 
     # Ampelzeilen (Status + Kategorie + reason 1:1 aus traffic_lights).
+    # Status als Wort (gruen/gelb/rot) — kein Emoji.
     for key in _TRAFFIC_LIGHT_ORDER:
         light = lights.get(key)
         if not isinstance(light, dict):
@@ -186,32 +212,33 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
     if isinstance(max_position_pct, (int, float)) and max_position_pct > 0:
         limit_bits.append(f"Einzelposition {max_position_pct:.1f}%")
     if isinstance(max_sector_pct, (int, float)) and max_sector_pct > 0:
-        limit_bits.append(f"Sektor {max_sector_pct:.1f}%")
+        limit_bits.append(f"Satellite-Sektor {max_sector_pct:.1f}%")
     if isinstance(max_turnover_pct, (int, float)) and max_turnover_pct > 0:
-        limit_bits.append(f"Umschlag max. {max_turnover_pct:.1f}%/Jahr")
+        limit_bits.append(f"Umschlag {max_turnover_pct:.1f}%/Jahr")
     if limit_bits:
-        lines.append("- Limits: " + ", ".join(limit_bits) + ".")
+        lines.append("- Max. Anteil: " + ", ".join(limit_bits) + ".")
 
-    # Positions-Tabelle (Name, ISIN, Kategorie, Wert, Anteil, Limit, Status).
+    # Positions-Zeilen als Fliesstext (keine Markdown-Tabelle, keine Pipe).
     detail = summary.get("positions_detail")
     if isinstance(detail, list) and detail:
-        lines.append("")
-        lines.append("| Position | ISIN | Kategorie | Wert | Anteil | Limit | Status |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("Positionen:")
         for pos in detail:
             if not isinstance(pos, dict):
                 continue
             weight = pos.get("weight")
             if isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0:
-                anteil = f"{round(float(weight) * 100, 1):.1f}%"
+                anteil = f"{round(float(weight) * 100, 1):.1f}% des Gesamtportfolios"
             else:
-                anteil = "–"
+                anteil = "unbewertet (kein Anteil)"
             limit = pos.get("limit_pct")
-            limit_txt = f"{float(limit):.1f}%" if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0 else "–"
+            if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+                limit_txt = f"max. Anteil {float(limit):.1f}%"
+            else:
+                limit_txt = "kein Einzelpositionslimit"
             category = str(pos.get("category") or "unknown")
             status = str(pos.get("status") or "")
             lines.append(
-                "| {name} | {isin} | {cat} | {wert} | {anteil} | {limit} | {status} |".format(
+                "- {name} ({isin}), Kategorie {cat}: {wert}, {anteil}; {limit}; Status {status}.".format(
                     name=str(pos.get("name") or "–"),
                     isin=str(pos.get("isin") or "–"),
                     cat=_CATEGORY_SHORT.get(category, category),
@@ -222,25 +249,28 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
                 )
             )
 
-    # Sektor-Tabelle (nur Satellite-Sektoren).
+    # Sektor-Zeilen — Anteil ausdruecklich AM SATELLITE-UMFANG relativiert,
+    # damit ein Wert wie "Unknown 100.0%" nie als Gesamtportfolio-Konzentration
+    # wirkt.
     sectors = summary.get("sectors_detail")
     if isinstance(sectors, list) and sectors:
-        lines.append("")
-        lines.append("| Satellite-Sektor | Wert | Anteil | Limit | Status |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("Satellite-Sektoren (Anteil am Satellite-Umfang):")
         for sec in sectors:
             if not isinstance(sec, dict):
                 continue
             ratio = sec.get("ratio")
             if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and ratio > 0:
-                anteil = f"{round(float(ratio) * 100, 1):.1f}%"
+                anteil = f"{round(float(ratio) * 100, 1):.1f}% der Satellite-Positionen"
             else:
-                anteil = "–"
+                anteil = "kein Anteil"
             limit = sec.get("limit_pct")
-            limit_txt = f"{float(limit):.1f}%" if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0 else "–"
+            if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+                limit_txt = f"max. Anteil {float(limit):.1f}%"
+            else:
+                limit_txt = "kein Sektorlimit"
             status = str(sec.get("status") or "")
             lines.append(
-                "| {name} | {wert} | {anteil} | {limit} | {status} |".format(
+                "- Satellite-Sektor {name}: {wert}, {anteil}; {limit}; Status {status}.".format(
                     name=str(sec.get("name") or "–"),
                     wert=_eur(sec.get("value_eur")),
                     anteil=anteil,
@@ -310,11 +340,16 @@ def _section_watchlist(facts_package: dict, allowed_fmt: set[str], allowed_2: se
     signals = _summary(facts_package).get("watchlist_signals")
     rows = _signal_rows(signals, allowed_fmt, allowed_2)
     if rows:
-        lines: list[str] = rows
+        lines = list(rows)
+        # Option 2: Kandidaten nur als Beobachtung/Review, ausdruecklich ohne
+        # Kauf-Empfehlung/Gewinn-Prognose.
+        lines.append("")
+        lines.append(_WATCHLIST_OBSERVATION_NOTE)
     else:
         lines = ["Keine Watchlist-Signale (NO SIGNAL für alle Positionen)."]
-    lines.append("")
-    lines.append(_FUNDAMENTALS_NOTE)
+    # Der Fundamentaldaten-Disclaimer steht genau EINMAL im Briefing (am Ende
+    # der Sell-/Reduce-Sektion) und gilt fuer alle Signal-Sektionen — kein
+    # Duplikat hier.
     return verify.WATCHLIST_SIGNALS_SECTION + "\n" + "\n".join(lines)
 
 
@@ -351,6 +386,14 @@ def _section_naechster_schritt(facts_package: dict) -> str:
         return line
 
     lines: list[str] = [_action_line(a) for a in akut]
+    # ISINs, die oben bereits konkret adressiert werden — vermeidet die
+    # dreifache Wiederholung derselben Position in Sell-Sektion und
+    # Naechster-Schritt.
+    mentioned_isins = {
+        str(a.get("isin"))
+        for a in akut
+        if isinstance(a, dict) and a.get("isin")
+    }
     for key in ("satellite_sell_signals", "watchlist_signals"):
         signals = summary.get(key)
         if not isinstance(signals, list):
@@ -360,10 +403,14 @@ def _section_naechster_schritt(facts_package: dict) -> str:
                 continue
             if signal.get("signal") not in _ACUTE_SIGNAL_LABELS:
                 continue
-            name = str(signal.get("name") or signal.get("isin") or "?")
             isin = str(signal.get("isin") or "")
+            if isin and isin in mentioned_isins:
+                continue  # Position ist oben bereits konkret adressiert
+            name = str(signal.get("name") or signal.get("isin") or "?")
             sig = str(signal.get("signal"))
             lines.append(f"- {sig}-Signal adressieren: {name} ({isin}) — Details in der Signal-Sektion.")
+            if isin:
+                mentioned_isins.add(isin)
 
     dq_status = summary.get("data_quality_status")
     if dq_status not in (None, "ok"):

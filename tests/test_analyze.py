@@ -66,6 +66,17 @@ def test_core_satellite_reads_portfolio_core_pct():
     assert result["status"] == "green"
 
 
+def test_core_satellite_reports_actual_satellite_ratio_not_target():
+    """P0: satellite_ratio ist der IST-Anteil (Satellite-Werte / Gesamtwert),
+    nicht der Strategie-Zielwert portfolio.satellite_pct (25.0)."""
+    result = analyze.calculate_core_satellite(_positions(8810.0, 1190.0), REAL_STRATEGY)
+    assert result["satellite_ratio"] == 0.119  # 1190 / 10000
+    assert result["satellite_ratio"] != REAL_STRATEGY["portfolio"]["satellite_pct"] / 100.0
+    # Ohne Gesamtwert (leere Positionen) -> 0.0 (fail-closed, kein Zielwert).
+    empty = analyze.calculate_core_satellite([], REAL_STRATEGY)
+    assert empty["satellite_ratio"] == 0.0
+
+
 def test_core_satellite_band_uses_rebalancing_threshold_pct():
     """Toleranzband = core_pct ± rebalancing.threshold_pct (75 ± 5pp)."""
     # 72% Core liegt im Band -> green

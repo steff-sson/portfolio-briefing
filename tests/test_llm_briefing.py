@@ -598,21 +598,27 @@ def test_briefing_prompt_extended_section_content_phase_4a():
     zur vierteljaehrlichen Strategiesitzung, keine Soforttransaktion)."""
     content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
 
-    # Kurzlage: schneller Überblick zuerst — Gesamturteil, Ampeln, Gesamtwert,
+    # Kurzlage: direkte Ein-Satz-Zusammenfassung zuerst — Ampeln, Gesamtwert,
     # Core-/Satellite-Anteile mit Ziel aus den deterministischen Paket-Feldern.
-    assert "schnellen Überblick" in content
-    assert "Gesamturteil" in content
+    assert "Ein-Satz-Fazit" in content
     assert "traffic_lights" in content
     assert "total_value_eur" in content
-    assert "Core-Ziel" in content
+    assert "Core-ZIEL" in content
     assert "core_ratio" in content
+    # P0-Fix: Satellite-IST kommt aus satellite_ratio, nie aus dem Zielwert.
+    assert "deterministic_summary.satellite_ratio" in content
+    assert "NIEMALS strategy_thresholds_pct.satellite_pct als Ist-Wert" in content
 
     # Konkrete Positionen/Sektoren mit Name, ISIN, Kategorie, Wert, Anteil,
-    # Limit, Status — additive Faktenfelder positions_detail/sectors_detail.
+    # "max. Anteil", Status — additive Faktenfelder positions_detail/sectors_detail.
     assert "positions_detail" in content
     assert "sectors_detail" in content
     assert "limit_pct" in content
+    assert "Max. Anteil" in content
     assert "Core-ETFs niemals als Satellite-REDUCE" in content
+    # Sektor-Anteil wird ausdruecklich am Satellite-Umfang relativiert.
+    assert "der Satellite-Positionen" in content
+    assert "keine Gesamtportfolio-Konzentration" in content
 
     # Datenqualitaet als eigene Sektion (Problem separat erklaeren).
     assert "Datenprobleme gehören in diese Sektion" in content
@@ -638,6 +644,50 @@ def test_briefing_prompt_extended_section_content_phase_4a():
         idx = content.index(section)
         assert idx > pos, f"Sektion {section} nicht in Contract-Reihenfolge"
         pos = idx
+
+
+def test_briefing_prompt_plain_text_and_redundancy_contract():
+    """Laiensicht: briefing.txt erzwingt reinen Text und Redundanz-Reduktion."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    assert "Reiner Text" in content
+    assert "KEINE Markdown-Tabellen" in content
+    assert "keine Emoji" in content
+    assert "Max. Anteil" in content
+    assert "Wiederhole eine Position nicht in allen drei Sektionen" in content
+    assert "GENAU EINMAL im Briefing" in content
+
+
+def test_briefing_prompt_option2_watchlist_observation_contract():
+    """Option 2 (Laiensicht): Watchlist-Kandidaten nur als Beobachtung/Review,
+    ohne Kauf-Empfehlung/Gewinn-/Kursprognose, keine Markt-Timing-/
+    Rendite-Versprechen — Klarstellung in briefing.txt UND revise.txt."""
+    from scripts import verify
+
+    briefing = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    revise = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
+
+    assert "OPTION-2-KLARSTELLUNG" in briefing
+    assert "Beobachtung/Review" in briefing
+    assert "keine Kauf-Empfehlung, keine Gewinn-Prognose" in briefing
+    assert "belastbare Gewinn- oder Kurs-Prognose" in briefing
+    assert "Fundamentaldaten (Umsatz, Gewinn, Bewertung)" in briefing
+    assert "Markt-Timing" in briefing
+    assert "Rendite-Versprechen" in briefing
+
+    assert "Option 2" in revise
+    assert "Beobachtung/Review" in revise
+    assert "keine Kauf-Empfehlung" in revise
+
+
+def test_briefing_prompt_has_no_positive_forecast_promise():
+    """Der Prompt selbst enthaelt keine positive Prognose-/Versprechens-Formulierung
+    (die Option-2-Klarstellung ist verneint und bleibt erlaubt)."""
+    from scripts import verify
+
+    briefing = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    revise = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
+    assert verify._forecast_promise_violations(briefing) == []
+    assert verify._forecast_promise_violations(revise) == []
 
 
 def test_only_single_prompt_file_and_setup_exists():
@@ -931,7 +981,11 @@ def test_revise_prompt_has_placeholders_and_correction_mandate():
     ):
         assert section in content
     assert "NUR mit dem vollständigen, korrigierten" in content
-    assert "Briefing-Markdown (alle 6 Sektionen)" in content
+    assert "reinem Text (alle 6 Sektionen, ohne Tabellen/Markdown-Formatierung)" in content
+    # Reiner-Text-Contract + Satellite-IST/Disclaimer auch im Revisions-Prompt.
+    assert "Keine Markdown-Tabellen" in content or "KEINE Markdown-Tabellen" in content
+    assert "deterministic_summary.satellite_ratio" in content
+    assert "der Satellite-Positionen" in content
 
 
 def test_format_findings_for_prompt_structured():
