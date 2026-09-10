@@ -26,9 +26,19 @@ MANDAT:
   ## Nächster Schritt
 - Reiner Text: KEINE Markdown-Tabellen, keine Tabellen-/Trennzeilen (keine
   senkrechten Striche), keine Sternchen für Fett/Kursiv, keine
-  Emoji-/Status-Symbole. Status als Wort (grün/gelb/rot), Listen als
-  "- "-Zeilen. Der Fundamentaldaten-Disclaimer steht genau einmal (Ende der
-  Sell-/Reduce-Sektion).
+  Emoji-/Status-Symbole. Ampel-Status einheitlich als Klammer-Label am
+  Zeilenanfang: [GRÜN]/[GELB]/[ROT] (Status "ok" = [GRÜN]); Listen als
+  "- "-Zeilen. Gesamtstatus in der ersten Kurzlage-Zeile. Leerzeilen zwischen
+  allen Stichpunkten und vor/nach jeder Sektions-Überschrift.
+  Der Fundamentaldaten-Disclaimer steht genau einmal (Ende der
+  Sell-/Reduce-Sektion) und als eigener Absatz, nicht im Bullet-Text.
+- Kurz halten (Zielumfang 400–450 Wörter): Core-/Satellite-Abweichung,
+  Einzelpositions-Band und Disclaimer je höchstens 1×; Sell-/Reduce- und
+  Nächster-Schritt-Hinweise nicht dreifach wiederholen. Positionen nur in
+  Kürzform (Name + Anteil + Ampel-Label), keine vollständige ISIN-Liste.
+- Die Empfehlung ist Label + ein kurzer Satz (keine Herleitung). Bei roter
+  Thesen-Ampel "abgelaufene These" laienverständlich erklären; "Unknown"-
+  Sektoren als Datenlücke, nicht als echte Sektor-Konzentration darstellen.
 - Der Satellite-IST-Anteil ist deterministic_summary.satellite_ratio — niemals
   strategy_thresholds_pct.satellite_pct (das ist nur das Ziel). Sektor-Anteile
   stets als Anteil AM SATELLITE-UMFANG formulieren ("X % der Satellite-Positionen").

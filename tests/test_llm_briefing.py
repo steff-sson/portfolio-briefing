@@ -657,6 +657,50 @@ def test_briefing_prompt_plain_text_and_redundancy_contract():
     assert "GENAU EINMAL im Briefing" in content
 
 
+def test_briefing_prompt_ampel_labels_blank_lines_and_word_budget():
+    """Laiensicht-Revision: einheitliche Ampel-Labels am Zeilenanfang,
+    Gesamtstatus in Kurzlage-Zeile 1, Leerzeilen-Regel und Wortbudget."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    assert "[GRÜN]" in content
+    assert "[GELB]" in content
+    assert "[ROT]" in content
+    assert 'Status "ok" wird als [GRÜN]' in content
+    assert "ERSTE Zeile der Kurzlage" in content
+    assert "Leerzeilen zwischen allen Stichpunkten" in content
+    assert "400–450 Wörter" in content
+    assert "nicht dreifach wiederholen" in content
+
+
+def test_briefing_prompt_anlagethesen_and_unknown_sector_clarity():
+    """Laiensicht-Revision: 'abgelaufene These' wird erklaert; Sektor 'Unknown'
+    ist eine Datenluecke, kein falscher Konzentrations-Alarm."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    assert "abgelaufene These" in content
+    assert "Merkfrist" in content
+    assert "geprüft oder erneuert" in content
+    assert "Datenlücke" in content
+    assert "kein echter Konzentrations-Alarm" in content
+
+
+def test_briefing_prompt_no_isin_flood_and_short_recommendation():
+    """Kuerzung: keine vollstaendige ISIN-Liste im Fliesstext; Empfehlung nur
+    Label + ein Satz (keine Herleitung)."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+    assert "vollständige ISIN-Liste gehört NICHT in den Fließtext" in content
+    assert "GENAU EIN kurzer Satz" in content
+    assert "Keine Herleitung" in content
+
+
+def test_revise_prompt_ampel_labels_blank_lines_and_shortening():
+    """revise.txt traegt dieselben neuen Format-/Kuerzungsregeln."""
+    revise = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
+    assert "[GRÜN]/[GELB]/[ROT]" in revise
+    assert "Leerzeilen zwischen" in revise
+    assert "400–450" in revise
+    assert "Datenlücke" in revise
+    assert "keine vollständige ISIN-Liste" in revise
+
+
 def test_briefing_prompt_option2_watchlist_observation_contract():
     """Option 2 (Laiensicht): Watchlist-Kandidaten nur als Beobachtung/Review,
     ohne Kauf-Empfehlung/Gewinn-/Kursprognose, keine Markt-Timing-/

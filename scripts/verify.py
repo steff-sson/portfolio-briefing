@@ -583,6 +583,10 @@ def _extract_tickers(text: str, facts_package: dict | None = None) -> set[str]:
         # LLM schreibt sie auch als "(ACC)". Zusätzlich greift der Paket-
         # Ausschluss über _facts_name_words ("AC" ⊂ "acc").
         "ACC",
+        # Ampel-Labels (Laiensicht-Revision): [ROT]/[GELB]/[GRÜN] stehen am
+        # Zeilenanfang; ROT/GELB sind reine Großbuchstaben-Token und dürfen
+        # nie als Ticker gelten (GRÜN trifft der Ticker-Regex wegen Ü nicht).
+        "ROT", "GELB", "GRÜN",
     }
     candidates = set(re.findall(r"\b[A-Z]{2,5}(?:[-\.]?[A-Z]+)?\b", text))
     candidates -= common

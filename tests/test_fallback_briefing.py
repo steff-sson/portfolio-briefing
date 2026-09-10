@@ -1,10 +1,12 @@
 """Regressionstests fuer das deterministische Faktenbriefing (Phase D, Laiensicht).
 
-Fokus: reiner Text (keine Markdown-Tabellen/Sternchen/Emoji), direkte
-Ein-Satz-Zusammenfassung, relativierte Sektor-Anteile ("% der
-Satellite-Positionen"), "max. Anteil" statt "Limit", genau EIN
-Fundamentaldaten-Disclaimer und keine generische "Gegenargument"-Zeile.
-Kein LLM-Call, keine Secrets.
+Fokus: reiner Text (keine Markdown-Tabellen/Sternchen/Emoji), einheitliche
+Ampel-Labels ([GRÜN]/[GELB]/[ROT]) am Zeilenanfang, Gesamtstatus in der ersten
+Kurzlage-Zeile, Leerzeilen zwischen Stichpunkten, Kuerzung (Positionen nur als
+Name + Anteil + Status, keine ISIN-Flut), relativierte Sektor-Anteile
+("% der Satellite-Positionen") mit Datenluecken-Hinweis, Anlagethesen-Klarheit,
+genau EIN Fundamentaldaten-Disclaimer und die beibehaltene
+Option-2-Watchlist-Beobachtung. Kein LLM-Call, keine Secrets.
 """
 from __future__ import annotations
 
@@ -87,27 +89,104 @@ def test_fallback_is_plain_text_without_markdown_markers():
         assert re.search(rf"^{re.escape(section)}$", text, re.MULTILINE)
 
 
-def test_fallback_starts_with_one_sentence_summary_before_bullets():
-    """Vor den Aufzaehlungspunkten steht eine direkte Ein-Satz-Zusammenfassung."""
+def test_fallback_starts_with_overall_ampel_status():
+    """Erste Zeile der Kurzlage = Gesamtstatus als Ampel-Label; danach der
+    Fallback-Marker. Vor den Aufzaehlungspunkten steht das Ein-Satz-Fazit."""
     text = fallback_briefing.build_fallback_briefing(_package())
     kurzlage = verify._extract_section(text, "## Kurzlage")
     assert kurzlage is not None
     body_lines = [line for line in (verify._section_content(kurzlage) or "").splitlines() if line.strip()]
-    # Zeile 1 = Fallback-Marker, Zeile 2 = Ein-Satz-Fazit (1:1-Empfehlung).
-    assert body_lines[1].startswith("Gesamturteil: WATCH.")
-    # Das Fazit steht VOR dem ersten Aufzaehlungspunkt.
-    first_bullet = next(i for i, line in enumerate(body_lines) if line.startswith("- "))
-    assert body_lines.index(body_lines[1]) < first_bullet
+    assert body_lines[0].startswith("[GELB] Gesamturteil: WATCH.")
+    assert body_lines[1].startswith(fallback_briefing.FALLBACK_MARKER)
+
+
+def test_fallback_ampel_labels_are_consistent_and_ok_is_green():
+    """Ampel-Labels [GRÜN]/[GELB]/[ROT] stehen am Zeilenanfang; Status 'ok'
+    wird [GRÜN] (kein Wort 'ok'). Gesamtstatus prominent in Zeile 1."""
+    text = fallback_briefing.build_fallback_briefing(_package())
+    assert "[GRÜN]" in text
+    assert "[GELB]" in text
+    assert "[ROT]" in text
+    # Position mit Status "ok" -> [GRÜN], nicht das Wort "ok".
+    assert "[GRÜN] Welt Core: 88.1% des Gesamtportfolios." in text
+    assert "Status ok" not in text
+    # Datenqualitaet "ok" -> [GRÜN] "in Ordnung".
+    assert "[GRÜN] Datenqualität: in Ordnung." in text
+    # Ampelzeile in der Kurzlage nennt kein "ok".
+    assert "[GRÜN] Datenqualität unauffällig." in text
+    # Gesamtstatus-Label in der ersten Kurzlage-Zeile.
+    assert "[GELB] Gesamturteil: WATCH." in text
+
+
+def test_fallback_has_blank_lines_between_bullets_and_after_headers():
+    """Leerzeilen zwischen allen Stichpunkten und direkt nach jeder
+    Sektions-Überschrift (Laiensicht-Lesbarkeit)."""
+    text = fallback_briefing.build_fallback_briefing(_package())
+    assert "\n\n[ROT] Core-/Satelliten-Aufteilung:" in text
+    assert "\n\n[GELB] NVIDIA: 11.9% des Gesamtportfolios." in text
+    assert "\n\n[GRÜN] Welt Core: 88.1% des Gesamtportfolios." in text
+    for section in verify.DRAFT_SECTIONS:
+        assert f"{section}\n\n" in text, f"keine Leerzeile nach {section}"
+
+
+def test_fallback_positions_have_no_isin_flood():
+    """Kurzform: Positionen nennen nur Name + Anteil + Status — keine
+    vollstaendige ISIN-Liste im Fliesstext."""
+    text = fallback_briefing.build_fallback_briefing(_package())
+    assert "IE00BKM4GZ66" not in text
+    assert "US67066G1040" not in text
 
 
 def test_fallback_satellite_sector_is_relativized_to_satellite_scope():
-    """'Unknown 100%' erscheint als Anteil der Satellite-Positionen, nicht als
-    Gesamtportfolio-Konzentration; Spalte heisst 'max. Anteil' (kein 'Limit')."""
+    """'Unknown 100%' erscheint als Anteil der Satellite-Positionen (mit
+    Datenluecken-Hinweis), nicht als Gesamtportfolio-Konzentration; die
+    Limit-Zeile heisst 'Max. Anteil' (kein 'Limit')."""
     text = fallback_briefing.build_fallback_briefing(_package())
     assert "100.0% der Satellite-Positionen" in text
     assert "Anteil am Satellite-Umfang" in text
-    assert "max. Anteil" in text
+    assert "Max. Anteil" in text
+    assert "Datenlücke" in text
+    assert "keine echte Übergewichtung" in text
     assert "| Limit |" not in text
+
+
+def test_fallback_sector_unknown_is_data_gap_not_concentration():
+    """Sektor 'Unknown' wird als Datenlücke erklärt, nicht als echte
+    Sektor-Konzentration (kein falscher Alarm)."""
+    text = fallback_briefing.build_fallback_briefing(_package())
+    assert "[ROT] Satellite-Sektor Unknown: 100.0% der Satellite-Positionen." in text
+    assert "keine Sektordaten hinterlegt" in text
+    assert "Datenlücke, keine echte Übergewichtung" in text
+
+
+def test_fallback_explains_expired_theses():
+    """Anlagethesen-Klarheit: Eine rote Thesen-Ampel erklaert laienverständlich,
+    was 'abgelaufene These' heißt."""
+    package = _package()
+    package["deterministic_summary"]["traffic_lights"]["thesis_deadlines"] = {
+        "status": "red",
+        "reason": "Abgelaufene Thesen: nvidia-thesis.md.",
+    }
+    package["deterministic_summary"]["outdated_theses"] = [
+        {"file": "nvidia-thesis.md", "created": "2025-01-01"}
+    ]
+    text = fallback_briefing.build_fallback_briefing(package)
+    assert "[ROT] Thesen-Fristen:" in text
+    assert "Abgelaufene These heißt:" in text
+    assert "geprüft oder erneuert" in text
+
+
+def test_fallback_recommendation_is_label_plus_one_sentence():
+    """Empfehlungs-Herleitung gestrichen: nur Label + ein Satz."""
+    text = fallback_briefing.build_fallback_briefing(_package())
+    empfehlung = verify._section_content(
+        verify._extract_section(text, "## Empfehlung")
+    ) or ""
+    assert empfehlung.count("WATCH") == 1
+    assert "[GELB] WATCH —" in empfehlung
+    assert "Kategorien" not in empfehlung  # keine Herleitung
+    # Die Herleitung steht nur EINMAL (Kurzlage), nicht erneut in der Empfehlung.
+    assert text.count("2 rot, 4 grün von 7 Kategorien") == 1
 
 
 def test_fallback_contains_disclaimer_exactly_once():

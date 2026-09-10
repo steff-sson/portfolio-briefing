@@ -968,6 +968,16 @@ class TestPlainTextOutput:
         draft = self._draft_with("- Ein normaler Aufzaehlungspunkt.")
         assert verify.verify_draft(VALID_FACTS, draft) == []
 
+    def test_ampel_labels_are_not_tickers_and_do_not_block(self):
+        """[ROT]/[GELB]/[GRÜN] sind Ampel-Labels (Laiensicht-Revision), keine
+        Ticker — sie duerfen nicht als 'Ticker nicht im Portfolio' blocken."""
+        draft = self._draft_with(
+            "[ROT] Sektorkonzentration. [GELB] Einzelposition. [GRÜN] Umschlag."
+        )
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert not any("nicht im Portfolio" in f["issue"] for f in findings)
+        assert findings == []
+
     def test_disclaimer_once_is_sufficient(self):
         """Ein einziger Disclaimer (Sell-Sektion) genuegt — Watchlist darf leer sein."""
         draft = (

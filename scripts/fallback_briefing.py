@@ -27,7 +27,7 @@ import re
 from scripts import verify
 
 # Marker, der das Briefing eindeutig als deterministischen Fallback kennzeichnet
-# (kein LLM-Text). Steht am Anfang der Kurzlage.
+# (kein LLM-Text). Steht in der Kurzlage direkt nach dem Gesamtstatus.
 FALLBACK_MARKER = "Faktenbriefing — LLM-Text nicht verfügbar/validiert"
 
 # Deterministische Reihenfolge der Ampel-Kategorien (7, wie im Contract).
@@ -53,32 +53,62 @@ _CATEGORY_GERMAN = {
     "data_quality": "Datenqualität",
 }
 
-_STATUS_GERMAN = {"green": "grün", "yellow": "gelb", "red": "rot"}
+# Einheitliche Ampel-Labels (Laiensicht-Revision): Der Status steht als
+# eckiges Klammer-Label (ROT/GELB/GRÜN) am Zeilenanfang, nicht als Wort.
+# "Status ok" wird zu [GRÜN] (nie das Wort "ok").
+_AMPEL = {"green": "[GRÜN]", "yellow": "[GELB]", "red": "[ROT]"}
 
-_POSITION_STATUS_GERMAN = {
-    "rot": "rot",
-    "gelb": "gelb",
-    "gruen": "grün",
-    "green": "grün",
-    "yellow": "gelb",
-    "red": "rot",
-    "ok": "ok",
-    "unbewertet": "unbewertet",
+_AMPEL_POSITION = {
+    "grün": "[GRÜN]",
+    "gruen": "[GRÜN]",
+    "green": "[GRÜN]",
+    "ok": "[GRÜN]",
+    "gelb": "[GELB]",
+    "yellow": "[GELB]",
+    "unbewertet": "[GELB]",
+    "rot": "[ROT]",
+    "red": "[ROT]",
 }
 
-_CATEGORY_SHORT = {
-    "core": "Core",
-    "satellite": "Satellite",
-    "legacy": "Legacy",
-    "unknown": "unbekannt",
+_AMPEL_DATA_QUALITY = {
+    "ok": "[GRÜN]",
+    "stale": "[GELB]",
+    "incomplete": "[GELB]",
+    "implausible": "[ROT]",
+}
+
+# Gesamt-Empfehlung als Ampel: BUY = unauffällig, WATCH = beobachten,
+# SELL = Handlungsbedarf.
+_AMPEL_RECOMMENDATION = {"BUY": "[GRÜN]", "WATCH": "[GELB]", "SELL": "[ROT]"}
+
+# Signal-Labels der Sell-/Watchlist-Sektionen als Ampel (Rot = Verkauf/
+# Reduktion, Grün = Aufbau/Watchlist-Kauf, Gelb = reine Beobachtung).
+_AMPEL_SIGNAL = {
+    "SELL": "[ROT]",
+    "REDUCE": "[ROT]",
+    "AVOID": "[ROT]",
+    "BUY": "[GRÜN]",
+    "WATCH": "[GELB]",
+    "NO SIGNAL": "[GRÜN]",
+}
+
+# Kurze, deterministische Bedeutung des Empfehlungs-Labels (ein Satz).
+_RECOMMENDATION_MEANING = {
+    "BUY": "Aufstocken ist aus den Ampeln vertretbar.",
+    "SELL": "Reduzieren ist aus den Ampeln angezeigt.",
+    "WATCH": "Beobachten, keine sofortige Aktion.",
 }
 
 _DATA_QUALITY_STATUS_GERMAN = {
-    "ok": "ok",
+    "ok": "in Ordnung",
     "stale": "veraltet",
     "incomplete": "unvollständig",
     "implausible": "unplausibel",
 }
+
+# Kurzlabel der Datenqualitaets-Ampelzeile (Details folgen in der Sektion
+# Datenqualität). Vermeidet das redundante Wort "ok" in der Kurzlage.
+_DQ_AMPEL_TEXT = {"green": "unauffällig", "yellow": "unvollständig", "red": "auffällig"}
 
 # Fundamentaldaten-Disclaimer (identisch zum verify-Contract; wird von
 # verify.verify_draft case-insensitiv als Substring geprueft).
@@ -154,6 +184,18 @@ def _allowed_sets(facts_package: dict) -> tuple[set[str], set[str]]:
     )
 
 
+def _has_unknown_sector(summary: dict) -> bool:
+    """True, wenn die Satellite-Sektoren als "Unknown" (fehlende Sektordaten)
+    ausgewiesen sind — dann ist eine "Sektorkonzentration" eine Datenlücke,
+    keine echte Übergewichtung (Laiensicht-Klarstellung)."""
+    sectors = summary.get("sectors_detail")
+    if isinstance(sectors, list):
+        for sec in sectors:
+            if isinstance(sec, dict) and str(sec.get("name") or "").strip().lower() == "unknown":
+                return True
+    return str(summary.get("max_sector") or "").strip().lower() == "unknown"
+
+
 # --- Sektionen -----------------------------------------------------------------
 
 
@@ -164,35 +206,57 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
         thresholds = {}
     lights = summary.get("traffic_lights")
     lights = lights if isinstance(lights, dict) else {}
-    lines: list[str] = [FALLBACK_MARKER + ". Deterministisch aus autoritativen Fakten; Status unverändert."]
+    paragraphs: list[str] = []
 
-    # Direkte Ein-Satz-Zusammenfassung VOR allen Aufzaehlungspunkten
-    # (1:1 aus deterministic_summary.recommendation, keine neuen Fakten).
+    # Gesamtstatus ZUERST (prominent, erste Zeile der Kurzlage) — 1:1 aus
+    # deterministic_summary.recommendation, keine neuen Fakten.
     rec = summary.get("recommendation")
     if isinstance(rec, dict) and rec.get("label") in verify.RECOMMENDATION_LABELS:
+        label = str(rec["label"])
+        ampel = _AMPEL_RECOMMENDATION.get(label, "[GELB]")
         reason = rec.get("reason")
         reason_txt = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
-        lines.append(f"Gesamturteil: {rec['label']}.{reason_txt}")
+        paragraphs.append(f"{ampel} Gesamturteil: {label}.{reason_txt}")
     else:
-        lines.append("Gesamturteil: keine deterministische Empfehlung (Analyse-Daten fehlen).")
+        paragraphs.append("[GELB] Gesamturteil: keine deterministische Empfehlung (Analyse-Daten fehlen).")
+
+    paragraphs.append(FALLBACK_MARKER + ". Deterministisch aus autoritativen Fakten; Status unverändert.")
 
     total = summary.get("total_value_eur")
     if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
         count = summary.get("position_count")
         count_txt = f", {int(count)} Positionen" if isinstance(count, (int, float)) else ""
-        lines.append(f"Gesamtwert: {_eur(total)}{count_txt}.")
+        paragraphs.append(f"Gesamtwert: {_eur(total)}{count_txt}.")
 
-    # Ampelzeilen (Status + Kategorie + reason 1:1 aus traffic_lights).
-    # Status als Wort (gruen/gelb/rot) — kein Emoji.
+    unknown_sector = _has_unknown_sector(summary)
+
+    # Ampelzeilen: [ROT]/[GELB]/[GRÜN] am Zeilenanfang + Kategorie + reason
+    # (1:1 aus traffic_lights). "Status ok" steckt im [GRÜN]-Label, nicht im
+    # Wort "ok".
     for key in _TRAFFIC_LIGHT_ORDER:
         light = lights.get(key)
         if not isinstance(light, dict):
             continue
-        status = light.get("status")
-        status_txt = _STATUS_GERMAN.get(str(status), "unbekannt") if isinstance(status, str) else "unbekannt"
+        ampel = _AMPEL.get(str(light.get("status")), "[GELB]")
         label = _CATEGORY_GERMAN.get(key, key)
         reason = _embed(light.get("reason"), allowed_fmt, allowed_2)
-        lines.append(f"- {label}: {status_txt}" + (f" — {reason}" if reason else ""))
+        if key == "data_quality":
+            # Detail-Issues stehen in der Sektion Datenqualität; hier nur die
+            # Ampel als Label (kein redundantes "ok" in der Kurzlage).
+            dq_word = _DQ_AMPEL_TEXT.get(str(light.get("status")), "unklar")
+            paragraphs.append(f"{ampel} {label} {dq_word}.")
+        else:
+            paragraphs.append(f"{ampel} {label}:" + (f" {reason}" if reason else ""))
+        if key == "sector_concentration" and unknown_sector:
+            paragraphs.append(
+                'Hinweis: Der Sektor "Unknown" bedeutet, dass für die Satellite-Positionen '
+                "keine Sektordaten hinterlegt sind — das ist eine Datenlücke, keine echte Übergewichtung."
+            )
+        if key == "thesis_deadlines" and str(light.get("status")) == "red":
+            paragraphs.append(
+                "Abgelaufene These heißt: Die schriftliche Begründung für eine Position ist älter "
+                "als die Merkfrist und muss geprüft oder erneuert werden."
+            )
 
     # Strategie-Ziele/Limits (nur positive Schwellen — Werte 1:1 allowlist-konform).
     goal_bits: list[str] = []
@@ -204,7 +268,7 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
     if isinstance(threshold_pct, (int, float)) and threshold_pct > 0:
         goal_bits.append(f"Toleranz {threshold_pct:.1f}%")
     if goal_bits:
-        lines.append("- Strategie-Ziel: " + ", ".join(goal_bits) + ".")
+        paragraphs.append("Strategie-Ziel: " + ", ".join(goal_bits) + ".")
     limit_bits: list[str] = []
     max_position_pct = thresholds.get("max_position_pct")
     max_sector_pct = thresholds.get("max_sector_pct")
@@ -216,70 +280,47 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
     if isinstance(max_turnover_pct, (int, float)) and max_turnover_pct > 0:
         limit_bits.append(f"Umschlag {max_turnover_pct:.1f}%/Jahr")
     if limit_bits:
-        lines.append("- Max. Anteil: " + ", ".join(limit_bits) + ".")
+        paragraphs.append("Max. Anteil: " + ", ".join(limit_bits) + ".")
 
-    # Positions-Zeilen als Fliesstext (keine Markdown-Tabelle, keine Pipe).
+    # Positions-Kurzfassung (Laiensicht): je Position nur Name + Anteil +
+    # Ampel-Status. Keine ISIN-/Wert-/Kategorie-Flut im Fliesstext.
     detail = summary.get("positions_detail")
     if isinstance(detail, list) and detail:
-        lines.append("Positionen:")
+        paragraphs.append("Positionen:")
         for pos in detail:
             if not isinstance(pos, dict):
                 continue
+            name = str(pos.get("name") or "–")
             weight = pos.get("weight")
             if isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0:
                 anteil = f"{round(float(weight) * 100, 1):.1f}% des Gesamtportfolios"
             else:
                 anteil = "unbewertet (kein Anteil)"
-            limit = pos.get("limit_pct")
-            if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
-                limit_txt = f"max. Anteil {float(limit):.1f}%"
-            else:
-                limit_txt = "kein Einzelpositionslimit"
-            category = str(pos.get("category") or "unknown")
-            status = str(pos.get("status") or "")
-            lines.append(
-                "- {name} ({isin}), Kategorie {cat}: {wert}, {anteil}; {limit}; Status {status}.".format(
-                    name=str(pos.get("name") or "–"),
-                    isin=str(pos.get("isin") or "–"),
-                    cat=_CATEGORY_SHORT.get(category, category),
-                    wert=_eur(pos.get("value_eur")),
-                    anteil=anteil,
-                    limit=limit_txt,
-                    status=_POSITION_STATUS_GERMAN.get(status, status or "–"),
-                )
-            )
+            ampel = _AMPEL_POSITION.get(str(pos.get("status") or ""), "[GELB]")
+            paragraphs.append(f"{ampel} {name}: {anteil}.")
 
-    # Sektor-Zeilen — Anteil ausdruecklich AM SATELLITE-UMFANG relativiert,
+    # Sektor-Kurzfassung — Anteil ausdruecklich AM SATELLITE-UMFANG relativiert,
     # damit ein Wert wie "Unknown 100.0%" nie als Gesamtportfolio-Konzentration
-    # wirkt.
+    # wirkt. "Unknown" ist eine Datenlücke, keine echte Übergewichtung.
     sectors = summary.get("sectors_detail")
     if isinstance(sectors, list) and sectors:
-        lines.append("Satellite-Sektoren (Anteil am Satellite-Umfang):")
+        paragraphs.append("Satellite-Sektoren (Anteil am Satellite-Umfang):")
         for sec in sectors:
             if not isinstance(sec, dict):
                 continue
+            name = str(sec.get("name") or "–")
             ratio = sec.get("ratio")
             if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and ratio > 0:
                 anteil = f"{round(float(ratio) * 100, 1):.1f}% der Satellite-Positionen"
             else:
                 anteil = "kein Anteil"
-            limit = sec.get("limit_pct")
-            if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
-                limit_txt = f"max. Anteil {float(limit):.1f}%"
-            else:
-                limit_txt = "kein Sektorlimit"
-            status = str(sec.get("status") or "")
-            lines.append(
-                "- Satellite-Sektor {name}: {wert}, {anteil}; {limit}; Status {status}.".format(
-                    name=str(sec.get("name") or "–"),
-                    wert=_eur(sec.get("value_eur")),
-                    anteil=anteil,
-                    limit=limit_txt,
-                    status=_POSITION_STATUS_GERMAN.get(status, status or "–"),
-                )
-            )
+            ampel = _AMPEL_POSITION.get(str(sec.get("status") or ""), "[GELB]")
+            line = f"{ampel} Satellite-Sektor {name}: {anteil}."
+            if name.strip().lower() == "unknown":
+                line += " Keine Sektordaten hinterlegt (Datenlücke, keine echte Übergewichtung)."
+            paragraphs.append(line)
 
-    return "## Kurzlage\n" + "\n".join(lines)
+    return "## Kurzlage\n\n" + "\n\n".join(paragraphs)
 
 
 def _section_datenqualitaet(facts_package: dict) -> str:
@@ -290,15 +331,16 @@ def _section_datenqualitaet(facts_package: dict) -> str:
         issues = summary.get("data_quality_issues")
         dq = {"status": status, "issues": issues if isinstance(issues, list) else []}
     status = dq.get("status")
-    status_txt = _DATA_QUALITY_STATUS_GERMAN.get(str(status), str(status or "ok")) if isinstance(status, str) else "ok"
-    lines = [f"Status: {status_txt}"]
+    ampel = _AMPEL_DATA_QUALITY.get(str(status), "[GELB]") if isinstance(status, str) else "[GRÜN]"
+    status_txt = _DATA_QUALITY_STATUS_GERMAN.get(str(status), str(status or "ok")) if isinstance(status, str) else "in Ordnung"
+    paragraphs = [f"{ampel} Datenqualität: {status_txt}."]
     issues = dq.get("issues")
     if isinstance(issues, list) and issues:
-        lines.append("Hinweise:")
-        lines.extend(f"- {issue}" for issue in issues if isinstance(issue, str) and issue.strip())
+        paragraphs.append("Hinweise:")
+        paragraphs.extend(f"- {issue}" for issue in issues if isinstance(issue, str) and issue.strip())
     elif status in (None, "ok"):
-        lines.append("Keine bekannten Probleme.")
-    return "## Datenqualität\n" + "\n".join(lines)
+        paragraphs.append("Keine bekannten Probleme.")
+    return "## Datenqualität\n\n" + "\n\n".join(paragraphs)
 
 
 def _signal_rows(signals: object, allowed_fmt: set[str], allowed_2: set[str]) -> list[str]:
@@ -309,15 +351,14 @@ def _signal_rows(signals: object, allowed_fmt: set[str], allowed_2: set[str]) ->
         if not isinstance(signal, dict) or signal.get("excluded"):
             continue
         name = str(signal.get("name") or signal.get("isin") or "?")
-        isin = str(signal.get("isin") or "")
         sig = str(signal.get("signal") or "NO SIGNAL")
+        ampel = _AMPEL_SIGNAL.get(sig, "[GELB]")
         score = signal.get("score")
         score_txt = ""
         if isinstance(score, int) and not isinstance(score, bool) and score != 0:
             score_txt = f" (Score {score:+d})"
         reason = _embed(signal.get("reason"), allowed_fmt, allowed_2)
-        isin_txt = f" ({isin})" if isin else ""
-        line = f"- {name}{isin_txt}: {sig}{score_txt}"
+        line = f"{ampel} {name}: {sig}{score_txt}"
         if reason:
             line += f" — {reason}"
         lines.append(line)
@@ -328,39 +369,39 @@ def _section_sell_reduce(facts_package: dict, allowed_fmt: set[str], allowed_2: 
     signals = _summary(facts_package).get("satellite_sell_signals")
     rows = _signal_rows(signals, allowed_fmt, allowed_2)
     if rows:
-        lines: list[str] = rows
+        paragraphs: list[str] = list(rows)
     else:
-        lines = ["Keine Sell-/Reduce-Signale."]
-    lines.append("")
-    lines.append(_FUNDAMENTALS_NOTE)
-    return verify.SELL_SIGNALS_SECTION + "\n" + "\n".join(lines)
+        paragraphs = ["- Keine Sell-/Reduce-Signale."]
+    # Disclaimer als eigener Absatz (nicht im bulletteten Fliesstext).
+    paragraphs.append(_FUNDAMENTALS_NOTE)
+    return verify.SELL_SIGNALS_SECTION + "\n\n" + "\n\n".join(paragraphs)
 
 
 def _section_watchlist(facts_package: dict, allowed_fmt: set[str], allowed_2: set[str]) -> str:
     signals = _summary(facts_package).get("watchlist_signals")
     rows = _signal_rows(signals, allowed_fmt, allowed_2)
     if rows:
-        lines = list(rows)
+        paragraphs: list[str] = list(rows)
         # Option 2: Kandidaten nur als Beobachtung/Review, ausdruecklich ohne
         # Kauf-Empfehlung/Gewinn-Prognose.
-        lines.append("")
-        lines.append(_WATCHLIST_OBSERVATION_NOTE)
+        paragraphs.append(_WATCHLIST_OBSERVATION_NOTE)
     else:
-        lines = ["Keine Watchlist-Signale (NO SIGNAL für alle Positionen)."]
+        paragraphs = ["- Keine Watchlist-Signale (NO SIGNAL für alle Positionen)."]
     # Der Fundamentaldaten-Disclaimer steht genau EINMAL im Briefing (am Ende
     # der Sell-/Reduce-Sektion) und gilt fuer alle Signal-Sektionen — kein
     # Duplikat hier.
-    return verify.WATCHLIST_SIGNALS_SECTION + "\n" + "\n".join(lines)
+    return verify.WATCHLIST_SIGNALS_SECTION + "\n\n" + "\n\n".join(paragraphs)
 
 
 def _section_empfehlung(facts_package: dict) -> str:
     rec = _summary(facts_package).get("recommendation")
     if isinstance(rec, dict) and rec.get("label") in verify.RECOMMENDATION_LABELS:
         label = str(rec["label"])
-        reason = rec.get("reason")
-        reason_txt = f" — {reason}" if isinstance(reason, str) and reason.strip() else ""
-        return f"## Empfehlung\n{label}{reason_txt}"
-    return "## Empfehlung\nKeine deterministische Empfehlung (Analyse-Daten fehlen)."
+        ampel = _AMPEL_RECOMMENDATION.get(label, "[GELB]")
+        meaning = _RECOMMENDATION_MEANING.get(label, "")
+        meaning_txt = f" — {meaning}" if meaning else ""
+        return f"## Empfehlung\n\n{ampel} {label}{meaning_txt}"
+    return "## Empfehlung\n\n[GELB] Keine deterministische Empfehlung (Analyse-Daten fehlen)."
 
 
 def _section_naechster_schritt(facts_package: dict) -> str:
@@ -427,7 +468,7 @@ def _section_naechster_schritt(facts_package: dict) -> str:
 
     if not lines:
         lines.append("Nächste Woche neuer Lauf, keine Aktion erforderlich.")
-    return "## Nächster Schritt\n" + "\n".join(lines)
+    return "## Nächster Schritt\n\n" + "\n\n".join(lines)
 
 
 def build_fallback_briefing(facts_package: dict) -> str:
