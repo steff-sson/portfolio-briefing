@@ -5,11 +5,24 @@ Datenbeschaffung: Dry-Run via sc_bridge.load_mock(); produktiver Lauf via
 snapshot.load_previous -> sc_bridge.refresh_from_sc -> snapshot.capture_staged
 -> diff.diff_snapshots (kein update_config).
 
-1-Call-Architektur: Der produktive Pfad macht genau EINEN LLM-Call
-(llm_briefing.generate_draft, gemockt) -> verify_draft -> final_gate
-(verification-only) -> Versand. Keine Humanize-/Review-/Revise-Stufe.
+Phase C2 (briefing-revision-loop): Der produktive Pfad macht maximal
+MAX_LLM_ATTEMPTS LLM-Calls — 1 Initial-Draft (llm_briefing.generate_draft,
+gemockt) -> verify_draft -> final_gate; bei blockierenden Findings folgen
+hoechstens MAX_LLM_ATTEMPTS-1 Revisionen (llm_briefing.revise_draft, gemockt)
+mit erneutem verify/final_gate (gleiches Faktenpaket, strukturierte Findings).
+Keine Endlosschleife.
+
+Phase D (Fallback): Endet der LLM-Loop ohne validen Draft (Versuchslimit
+erschoepft oder harter LLM-/Verify-Fehler), wird bei valider Datenbasis das
+deterministische Faktenbriefing (fallback_briefing.build_fallback_briefing —
+kein weiterer LLM-Call) gerendert, durch verify_draft + final_gate gefuehrt
+und ueber den bestehenden Versand-Pfad verschickt (klar als Faktenbriefing
+markiert). Nur bei kaputter Datenbasis oder ungueltigem Fallback bleibt der
+technische Alert (kein Versand, keine Vault-Datei).
 """
 from __future__ import annotations
+
+import logging
 
 import pytest
 
@@ -109,6 +122,28 @@ def _mock_draft(monkeypatch, draft: str = VALID_DRAFT) -> dict:
     return calls
 
 
+def _mock_draft_and_revise(monkeypatch, draft: str) -> dict:
+    """Mockt generate_draft UND revise_draft: beide liefern denselben Draft.
+
+    Fuer Gate-Block-/Stubborn-Tests (Phase C2): verify blockt den Draft
+    weiterhin, das Versuchsbudget (MAX_LLM_ATTEMPTS: 1 Initial + 2 Revisionen)
+    laeuft deterministisch aus. Kein echter API-Call.
+    """
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return draft
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        return draft
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+    return calls
+
+
 def _fake_send(sent):
     def _send(text, mode):
         sent.append((text, mode))
@@ -117,8 +152,9 @@ def _fake_send(sent):
     return _send
 
 
-def test_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Bug-Regression: generate_draft-LLMError -> Exit != 0, kein Versand, keine Vault-Datei, nur Alert."""
+def test_llm_error_triggers_fallback_briefing(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: generate_draft-LLMError bei valider Datenbasis -> deterministisches
+    Faktenbriefing (kein LLM-Call, kein Alert), Versand im Briefing-Modus (rc 0)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
@@ -130,11 +166,11 @@ def test_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 1  # Exit-Code != 0
-    assert list(tmp_path.iterdir()) == []  # keine Vault-Datei geschrieben
-    assert len(sent) == 1  # nur der Alert, kein Briefing
-    assert sent[0][1] == "alert"
-    assert "API down" in sent[0][0]
+    assert rc == 0  # Fallback ersetzt den technischen Alert (Datenbasis valide)
+    assert list(tmp_path.iterdir()) == []  # kein Vault-Schreiben (send_briefing gemockt)
+    assert len(sent) == 1  # genau ein Briefing, KEIN Alert
+    assert sent[0][1] == "monday"  # Briefing-Modus, nicht mode=alert
+    assert "Faktenbriefing" in sent[0][0]  # klar als LLM-freies Briefing markiert
 
 
 def test_dry_run_archives_with_suffix_and_no_telegram(monkeypatch, tmp_path, portfolio, transactions):
@@ -172,16 +208,20 @@ def test_dry_run_does_not_block_real_run(monkeypatch, tmp_path, portfolio, trans
     assert draft_calls["draft_calls"] == 1  # generate_draft wurde aufgerufen -> kein Skip
 
 
-def test_send_failure_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+def test_send_failure_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions, caplog):
     """send_briefing=False -> kurzer Alert, Exit 1 statt 'completed successfully'.
 
     Keine doppelte Briefing-Datei: der Orchestrator legt nach fehlgeschlagenem
     Versand keine weitere Datei an (Archivierung passiert intern in send_briefing).
+    Auch der degradierte Plain-Text-Fallback meldet send_briefing=False (siehe
+    tests/test_send_telegram.py) — hier wird die Orchestrator-Fehlerpfad-
+    Semantik geprueft: kein 'send completed', kein 'completed successfully'.
     """
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     _mock_draft(monkeypatch)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or False)
+    caplog.set_level(logging.INFO)
 
     rc = run_briefing.run("monday", dry_run=False)
 
@@ -190,6 +230,8 @@ def test_send_failure_is_fail_closed(monkeypatch, tmp_path, portfolio, transacti
     assert sent[0][1] == "monday"
     assert sent[1][1] == "alert"
     assert "send failed" in sent[1][0]
+    assert "send completed" not in caplog.text
+    assert "completed successfully" not in caplog.text
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei (send_briefing gemockt)
 
 
@@ -398,9 +440,10 @@ def test_single_draft_call_then_verify_gate_send(monkeypatch, tmp_path, portfoli
 
 
 def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """final_gate blockt (critical/major aus verify) -> Alert, Exit 1, kein Versand."""
+    """final_gate blockt (critical/major aus verify) -> nach Revisions-Loop
+    (Versuchslimit erschoepft) Alert, Exit 1, kein Versand."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
-    _mock_draft(monkeypatch)
+    calls = _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
 
@@ -412,6 +455,8 @@ def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transaction
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 1
+    # Budget deterministisch erschoepft: 1 Initial + 2 Revisionen, kein 4. Call.
+    assert calls == {"generate": 1, "revise": 2}
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert "final_gate" in sent[0][0]
@@ -420,7 +465,7 @@ def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transaction
 def test_gate_alert_has_no_false_traceback(monkeypatch, tmp_path, portfolio, transactions):
     """Gate-Block-Alert darf keinen nutzlosen Traceback (NoneType) enthalten."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
-    _mock_draft(monkeypatch)
+    _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
 
@@ -439,8 +484,29 @@ def test_gate_alert_has_no_false_traceback(monkeypatch, tmp_path, portfolio, tra
     assert "Traceback" not in sent[0][0]
 
 
-def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Unerwarteter (nicht-LLM) Verify-Fehler -> fail-closed: Alert, kein Versand, keine Vault-Datei."""
+def test_generic_draft_error_triggers_fallback(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: unerwarteter Draft-Fehler (kein LLMError) -> Fallback-Briefing
+    statt Alert (valide Datenbasis, rc 0, Briefing-Modus)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    def _raise_error(facts_package, mode="monday", client=None):
+        raise RuntimeError("API down")
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _raise_error)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
+
+
+def test_fallback_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: schlaegt auch die Fallback-Verifikation fehl (interner Verify-Bug),
+    bleibt es beim technischen Alert — kein Versand, keine Vault-Datei."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     _mock_draft(monkeypatch)
     sent = []
@@ -457,12 +523,14 @@ def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, t
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1  # nur Alert, kein Briefing-Versand
     assert sent[0][1] == "alert"
-    assert "verify failed" in sent[0][0]
+    assert "Fallback-Verify fehlgeschlagen" in sent[0][0]
     assert "interner Verify-Bug" in sent[0][0]
 
 
-def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Separater LLMError-Pfad der Verifikation bleibt erhalten (fail-closed, Alert)."""
+def test_verify_llm_error_triggers_fallback_until_alert(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: LLMError aus der Verifikation -> Fallback-Versuch; schlaegt auch
+    die Fallback-Verifikation fehl (weiterhin LLMError), bleibt es beim
+    technischen Alert (fail-closed, kein Versand)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     _mock_draft(monkeypatch)
     sent = []
@@ -478,7 +546,7 @@ def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, 
     assert rc == 1
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
-    assert "verify failed (fail-closed)" in sent[0][0]
+    assert "Fallback-Verify fehlgeschlagen (fail-closed)" in sent[0][0]
 
 
 # --- P7: offene Punkte — Einspeisung, Lebenszyklus, Dry-Run --------------------
@@ -544,10 +612,16 @@ def test_every_error_path_leaves_open_points_open(monkeypatch, tmp_path, portfol
     assert track["resolved"] == []
     assert track["load_calls"] == 0
 
-    # 2. LLM-Fehler
+    # 2. LLM-Fehler bei KAPUTTER Datenbasis (implausible): kein Fallback ->
+    #    technischer Alert, Punkte bleiben open.
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    monkeypatch.setattr(
+        analyze, "assess_data_quality", lambda p, prev: {"status": "implausible", "issues": ["negativer Wert"]}
+    )
+
     def _raise(facts_package, mode="monday", client=None):
         raise llm_briefing.LLMError("API down")
+
     monkeypatch.setattr(llm_briefing, "generate_draft", _raise)
     assert run_briefing.run("monday", dry_run=False) == 1
     assert track["resolved"] == []
@@ -559,9 +633,9 @@ def test_every_error_path_leaves_open_points_open(monkeypatch, tmp_path, portfol
     assert run_briefing.run("monday", dry_run=False) == 1
     assert track["resolved"] == []
 
-    # 4. Gate-Block
+    # 4. Gate-Block (nach Revisions-Loop: Budget erschoepft)
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
-    _mock_draft(monkeypatch)
+    _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
     monkeypatch.setattr(run_briefing.verify, "verify_draft", lambda fp, d: [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}])
     assert run_briefing.run("monday", dry_run=False) == 1
     assert track["resolved"] == []
@@ -640,3 +714,373 @@ def test_dry_run_failure_still_no_mark_resolved(monkeypatch, tmp_path, portfolio
     assert rc == 1
     assert track["resolved"] == []
     assert track["load_calls"] == 0  # Facts-Fehler vor dem Load
+
+
+# --- Phase C2: begrenzter Revisions-Loop (briefing-revision-loop §3.1) ---------
+# run_briefing integriert Initial-Draft -> verify -> final_gate; bei
+# blockierenden Findings (critical/major) folgen hoechstens
+# MAX_LLM_ATTEMPTS-1 Revisionen (revise_draft) mit erneutem verify/final_gate
+# — gleiches Faktenpaket, strukturierte Findings. Kein Fallback (Phase D),
+# keine Endlosschleife; Dry-Run bleibt netzwerkfrei (nie eine Revision).
+
+# Draft, der die echte verify_draft blockt: nur 1 von 6 Pflichtsektionen.
+BAD_DRAFT = "## Kurzlage\nOK"
+
+
+def _spy_revise(monkeypatch, received: dict, revised_draft: str = VALID_DRAFT):
+    """Spy auf llm_briefing.revise_draft: zeichnet (facts, draft, findings) auf,
+    liefert revised_draft zurueck. Kein echter API-Call."""
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        received["facts"] = facts_package
+        received["previous_draft"] = previous_draft
+        received["findings"] = findings
+        received["calls"] = received.get("calls", 0) + 1
+        return revised_draft
+
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+
+def test_c2_fail_then_revision_then_pass(monkeypatch, tmp_path, portfolio, transactions):
+    """FAIL->REVISION->PASS: Initial-Draft blockt verify (critical), die
+    Revision liefert einen gueltigen Draft -> final_gate PASS -> Versand.
+    Genau 1 Initial-Call + 1 Revision, kein Fallback, keine Endlosschleife."""
+    order = []
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        order.append("generate")
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        order.append("revise")
+        return VALID_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    real_verify = run_briefing.verify.verify_draft
+
+    def _verify(facts_package, draft):
+        order.append("verify")
+        return real_verify(facts_package, draft)
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _verify)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert calls == {"generate": 1, "revise": 1}  # genau 2 LLM-Calls
+    assert order == ["generate", "verify", "revise", "verify"]  # kein 3. Versuch
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Kurzlage" in sent[0][0]
+
+
+def test_c2_stubborn_fail_exhausts_budget_then_fallback_sends(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D FAIL->FAIL->FAIL->FALLBACK: Initial-Draft und beide Revisionen
+    blocken verify (echtes Gate) — genau 3 LLM-Calls (1 Initial + 2 Revisionen),
+    danach deterministisches Faktenbriefing (kein 4. LLM-Call) -> Versand im
+    Briefing-Modus, rc 0, klar als Faktenbriefing markiert."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        return BAD_DRAFT  # bleibt hartnaeckig fehlerhaft
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0  # Fallback statt technischem Alert (Datenbasis valide)
+    assert calls == {"generate": 1, "revise": 2}  # genau 3 LLM-Versuche, kein 4. Call
+    assert list(tmp_path.iterdir()) == []  # kein Vault-Schreiben (send gemockt)
+    assert len(sent) == 1 and sent[0][1] == "monday"  # Briefing, kein Alert
+    assert "Faktenbriefing" in sent[0][0]
+    assert llm_briefing.MAX_LLM_ATTEMPTS == 3  # zentrale Konstante
+
+
+def test_c2_pass_without_revision(monkeypatch, tmp_path, portfolio, transactions):
+    """PASS ohne Revision: gueltiger Initial-Draft -> verify/gate ok -> Versand;
+    revise_draft wird NIE aufgerufen (bestehender 1-Call-Pfad bleibt kompatibel)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    draft_calls = _mock_draft(monkeypatch)
+    revise_calls = {"calls": 0}
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        revise_calls["calls"] += 1
+        return VALID_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert draft_calls["draft_calls"] == 1  # genau ein Initial-Draft
+    assert revise_calls["calls"] == 0  # keine Revision
+    assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+def test_c2_facts_identity_and_unchanged_between_attempts(monkeypatch, tmp_path, portfolio, transactions):
+    """Faktenpaket bleibt zwischen Initial-Draft und Revision IDENTISCH
+    (gleiche Instanz, kein Kopieren/Neuaufbau) und inhaltlich unveraendert."""
+    import copy
+
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: True)
+    received: dict = {}
+
+    def _generate(facts_package, mode="monday", client=None):
+        received["generate_facts"] = facts_package
+        received["generate_snapshot"] = copy.deepcopy(facts_package)
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        received["revise_facts"] = facts_package
+        return VALID_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert received["revise_facts"] is received["generate_facts"]  # Identitaet
+    assert received["revise_facts"] == received["generate_snapshot"]  # unveraendert
+
+
+def test_c2_revision_receives_only_blocking_findings_structured(monkeypatch, tmp_path, portfolio, transactions):
+    """Findings-Uebergabe: revise_draft bekommt NUR die blockierenden Findings
+    (critical/major) als strukturierte Liste — info/minor werden nicht
+    mitgegeben (gleiche Regel wie final_gate)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+    calls = {"generate": 0, "verify": 0}
+    received: dict = {}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return "Draft-1"
+
+    def _verify(facts_package, draft):
+        calls["verify"] += 1
+        if calls["verify"] == 1:
+            return [
+                {"severity": "critical", "issue": "Zahl 45.0% nicht erlaubt", "evidence": "e1", "correction": "c1"},
+                {"severity": "major", "issue": "Ticker/ISIN MSFT nicht im Portfolio", "evidence": "e2", "correction": "c2"},
+                {"severity": "minor", "issue": "Keine News referenziert", "evidence": "e3", "correction": "c3"},
+                {"severity": "info", "issue": "ISIN unbekannt", "evidence": "e4", "correction": "c4"},
+            ]
+        return []  # Revision gilt als behoben -> PASS
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _verify)
+    _spy_revise(monkeypatch, received)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert received["calls"] == 1
+    assert received["previous_draft"] == "Draft-1"  # der blockierte Draft
+    # Nur blockierende Findings (critical/major), strukturiert (dict mit
+    # severity/issue/evidence/correction) — minor/info bleiben aussen vor.
+    assert received["findings"] == [
+        {"severity": "critical", "issue": "Zahl 45.0% nicht erlaubt", "evidence": "e1", "correction": "c1"},
+        {"severity": "major", "issue": "Ticker/ISIN MSFT nicht im Portfolio", "evidence": "e2", "correction": "c2"},
+    ]
+    assert len(sent) == 1 and sent[0][1] == "monday"
+
+
+def test_c2_revision_timeout_triggers_fallback(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: Revision-Fehler/Timeout (LLMError aus revise_draft) -> kein
+    weiterer LLM-Versuch, deterministisches Fallback-Briefing -> Versand rc 0
+    (kein Alert; klar als Faktenbriefing markiert)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        raise llm_briefing.LLMError("Revision fehlgeschlagen: request timed out")
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0  # Fallback statt Fail-closed-Abbruch (Datenbasis valide)
+    assert calls == {"generate": 1, "revise": 1}  # kein weiterer LLM-Versuch nach Fehler
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "monday"  # Briefing, kein Alert
+    assert "Faktenbriefing" in sent[0][0]
+
+
+def test_c2_invalid_revision_exhausts_budget_then_fallback(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: ungueltige Revision (liefert weiterhin blockierenden Draft):
+    Budget laeuft nach 3 LLM-Calls deterministisch aus (kein 4. Call), danach
+    Fallback-Briefing -> Versand rc 0 (Briefing-Modus, Faktenbriefing-Marker)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0, "revise": 0}
+    received: dict = {}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        received["last_findings"] = findings
+        return "## Kurzlage\nImmer noch kaputt"  # ungueltig (nur 1 Sektion)
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0  # Fallback statt final_gate-Alert (Datenbasis valide)
+    assert calls == {"generate": 1, "revise": 2}
+    assert received["last_findings"]  # strukturierte Findings wurden uebergeben
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
+
+
+def test_c2_dry_run_never_revises_on_gate_block(monkeypatch, tmp_path, portfolio, transactions):
+    """Dry-Run bleibt netzwerkfrei: blockt das (gemockte) Gate, wird NIE
+    revidiert (kein revise_draft-Call, kein generate_draft-Call) — Abbruch
+    ueber den bestehenden Pfad, rc 1, kein Telegram-Alert im Dry-Run."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return VALID_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        return VALID_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    def _blocking_verify(facts_package, draft):
+        return [{"severity": "critical", "issue": "Halluzination", "evidence": "e", "correction": "c"}]
+
+    monkeypatch.setattr(run_briefing.verify, "verify_draft", _blocking_verify)
+
+    rc = run_briefing.run("monday", dry_run=True)
+
+    assert rc == 1
+    assert calls == {"generate": 0, "revise": 0}  # kein LLM-Call im Dry-Run
+    assert list(tmp_path.iterdir()) == []
+    assert sent == []  # Dry-Run: kein Telegram-Alert (nur Logging)
+
+
+# --- Phase D: deterministisches Fallback-Briefing (briefing-revision-loop §6) ---
+
+
+def test_phase_d_fallback_is_deterministic_no_llm_no_alert(monkeypatch, tmp_path, portfolio, transactions):
+    """Fallback verursacht KEINEN weiteren LLM-Call und KEINEN Alert: das
+    deterministische Faktenbriefing wird direkt nach Budget-Ende versendet."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return BAD_DRAFT
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        return BAD_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert calls == {"generate": 1, "revise": 2}  # MAX_LLM_ATTEMPTS, kein zusaetzlicher Call
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    body = sent[0][0]
+    # 6-Sektionen-Contract + Fallback-Marker + kein Fehler-/Alert-Text
+    for section in ("## Kurzlage", "## Datenqualität",
+                    "## Sell-/Reduce-Signale (bestehende Satellites)",
+                    "## Watchlist-Signale", "## Empfehlung", "## Nächster Schritt"):
+        assert section in body
+    assert "Faktenbriefing" in body
+
+
+def test_phase_d_invalid_data_basis_stays_technical_alert(monkeypatch, tmp_path, portfolio, transactions):
+    """Kaputte Datenbasis (implausible) + LLM-Fehler -> KEIN Fallback: nur
+    technischer Alert, kein Versand, keine Vault-Datei (rc 1)."""
+    _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    monkeypatch.setattr(
+        analyze, "assess_data_quality", lambda p, prev: {"status": "implausible", "issues": ["negativer Wert"]}
+    )
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+    calls = {"generate": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        raise llm_briefing.LLMError("API down")
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 1
+    assert calls == {"generate": 1}  # kein Fallback, kein weiterer LLM-Call
+    assert list(tmp_path.iterdir()) == []
+    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "Datenbasis nicht valide" in sent[0][0]
+    assert "Faktenbriefing" not in sent[0][0]
+
+
+def test_phase_d_fallback_promotes_staged_and_marks_resolved(monkeypatch, tmp_path, portfolio, transactions):
+    """Fallback durchlaeuft den bestehenden Erfolgspfad: staged wird promoted,
+    offene Punkte werden resolved (nur bei erfolgreichem Versand)."""
+    calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    track: dict = {}
+    _mock_open_points(monkeypatch, [_open_point(1, "SUSE endlich bewerten lassen!")], track)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", lambda text, mode: sent.append((text, mode)) or True)
+
+    def _generate(facts_package, mode="monday", client=None):
+        return BAD_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert calls["capture_staged"] == 1
+    assert calls["promote_staged"] == 1  # Snapshot-Promotion wie beim LLM-PASS
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert track["resolved"] == [1]  # Lebenszyklus wie nach erfolgreichem Versand

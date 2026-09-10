@@ -1,15 +1,20 @@
-"""Orchestrator tests (Phase 4, 1-Call-Architektur) with fake LLM.
+"""Orchestrator tests (Phase 4, 1-Call-Architektur + Phase C2 + Phase D) with fake LLM.
 
-Keine echten API-/Telegram-Aufrufe: generate_draft (der EINZIGE LLM-Call)
-wird gemockt, send_briefing wird gefaked. Fail-closed-Pfade duerfen keine
-Briefing-Datei im Vault anlegen. Datenbeschaffung: Dry-Run via load_mock;
-produktiver Lauf via load_previous -> refresh_from_sc -> capture_staged ->
-diff.diff_snapshots; staged wird erst nach final_gate + Render promoted
-(kein update_config).
+Keine echten API-/Telegram-Aufrufe: generate_draft und revise_draft (maximal
+MAX_LLM_ATTEMPTS LLM-Calls pro Lauf) werden gemockt, send_briefing wird
+gefaked. Fail-closed-Pfade duerfen keine Briefing-Datei im Vault anlegen.
+Datenbeschaffung: Dry-Run via load_mock; produktiver Lauf via load_previous ->
+refresh_from_sc -> capture_staged -> diff.diff_snapshots; staged wird erst
+nach final_gate + Render promoted (kein update_config).
 
-1-Call-Architektur: facts -> EIN generate_draft-Call -> verify_draft ->
-final_gate (verification-only) -> render_markdown -> send_telegram. Keine
-Humanize-/Review-/Revise-Stufe, kein Render-Hook zwischen Draft und Verify.
+Pipeline: facts -> generate_draft -> verify_draft -> final_gate; bei
+blockierenden Findings folgen hoechstens MAX_LLM_ATTEMPTS-1 Revisionen
+(revise_draft, gleiches Faktenpaket, strukturierte Findings) mit erneutem
+verify/final_gate. Phase D: endet der LLM-Loop ohne validen Draft, wird bei
+valider Datenbasis das deterministische Faktenbriefing gerendert
+(fallback_briefing, kein LLM-Call) und nach verify/final_gate im
+Briefing-Modus versendet; nur bei kaputter Datenbasis/ungueltigem Fallback
+bleibt der technische Alert. Kein Humanize-/Review-Pfad.
 """
 from __future__ import annotations
 
@@ -118,6 +123,28 @@ def _mock_draft(monkeypatch, draft: str = VALID_DRAFT, fail: Exception | None = 
     return calls
 
 
+def _mock_draft_and_revise(monkeypatch, draft: str) -> dict:
+    """Mockt generate_draft UND revise_draft: beide liefern denselben Draft.
+
+    Phase C2: verify blockt den Draft weiterhin, das Versuchsbudget
+    (MAX_LLM_ATTEMPTS: 1 Initial + 2 Revisionen) laeuft deterministisch aus.
+    Kein echter API-Call.
+    """
+    calls = {"generate": 0, "revise": 0}
+
+    def _generate(facts_package, mode="monday", client=None):
+        calls["generate"] += 1
+        return draft
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        calls["revise"] += 1
+        return draft
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+    return calls
+
+
 def test_pass_pipeline_sends_briefing(monkeypatch, tmp_path, portfolio, transactions):
     """Pass: Draft ok -> verify/gate ok -> Versand, rc 0. Genau ein LLM-Call."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
@@ -134,8 +161,9 @@ def test_pass_pipeline_sends_briefing(monkeypatch, tmp_path, portfolio, transact
     assert "Kurzlage" in sent[0][0]
 
 
-def test_draft_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """generate_draft wirft LLMError -> Alert, Exit 1, kein Versand, keine Vault-Datei."""
+def test_draft_llm_error_triggers_fallback(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: generate_draft-LLMError bei valider Datenbasis -> Fallback-Briefing
+    (kein LLM-Call), Versand im Briefing-Modus rc 0 — kein Alert."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
@@ -143,14 +171,14 @@ def test_draft_llm_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transa
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 1
+    assert rc == 0
     assert list(tmp_path.iterdir()) == []
-    assert len(sent) == 1 and sent[0][1] == "alert"
-    assert "draft failed (fail-closed)" in sent[0][0]
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
 
 
-def test_draft_generic_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Unerwarteter Draft-Fehler (kein LLMError) -> fail-closed, Alert, kein Versand."""
+def test_draft_generic_error_triggers_fallback(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: unerwarteter Draft-Fehler (kein LLMError) -> Fallback-Briefing rc 0."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
@@ -158,52 +186,56 @@ def test_draft_generic_error_is_fail_closed(monkeypatch, tmp_path, portfolio, tr
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 1
+    assert rc == 0
     assert list(tmp_path.iterdir()) == []
-    assert len(sent) == 1 and sent[0][1] == "alert"
-    assert "draft failed" in sent[0][0]
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
 
 
-def test_major_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transactions):
-    """Major Verify-Finding (unbekannter Ticker im Draft) blockt Versand."""
+def test_major_verify_finding_falls_back_after_budget(monkeypatch, tmp_path, portfolio, transactions):
+    """Major Verify-Finding (unbekannter Ticker): bleibt der Draft auch nach
+    den Revisionen fehlerhaft, laeuft das Budget deterministisch aus (kein
+    Loop), danach Fallback-Briefing -> Versand rc 0."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
 
-    def _bad_draft(facts_package, mode="monday", client=None):
-        # Draft enthaelt einen Ticker, den das Portfolio nicht kennt.
-        return VALID_DRAFT.replace(
-            "Apple (AAPL) konform.",
-            "Microsoft (MSFT) im Fokus.",
-            1,
-        )
-
-    monkeypatch.setattr(llm_briefing, "generate_draft", _bad_draft)
+    # Draft enthaelt einen Ticker, den das Portfolio nicht kennt — auch die
+    # Revision "korrigiert" ihn nicht (Budget laeuft aus).
+    bad_draft = VALID_DRAFT.replace(
+        "Apple (AAPL) konform.",
+        "Microsoft (MSFT) im Fokus.",
+        1,
+    )
+    calls = _mock_draft_and_revise(monkeypatch, bad_draft)
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 1
+    assert rc == 0  # Fallback (deterministisch, ohne MSFT) ersetzt den Alert
+    assert calls == {"generate": 1, "revise": 2}  # genau 3 Versuche, kein Loop
     assert list(tmp_path.iterdir()) == []
-    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
 
 
-def test_critical_verify_finding_blocks(monkeypatch, tmp_path, portfolio, transactions):
-    """Critical Verify-Finding (fehlende Sektion im Draft) blockt Versand."""
+def test_critical_verify_finding_falls_back_after_budget(monkeypatch, tmp_path, portfolio, transactions):
+    """Critical Verify-Finding (fehlende Sektion): bleibt der Draft fehlerhaft,
+    laeuft das Budget deterministisch aus, danach Fallback-Briefing -> rc 0."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
 
-    def _broken_draft(facts_package, mode="monday", client=None):
-        # Nur 1 von 6 Sektionen -> verify findet critical (fehlende Sektion).
-        return "## Kurzlage\nOK"
-
-    monkeypatch.setattr(llm_briefing, "generate_draft", _broken_draft)
+    # Nur 1 von 6 Sektionen -> verify findet critical (fehlende Sektion).
+    broken_draft = "## Kurzlage\nOK"
+    calls = _mock_draft_and_revise(monkeypatch, broken_draft)
 
     rc = run_briefing.run("monday", dry_run=False)
 
-    assert rc == 1
+    assert rc == 0  # Fallback ersetzt den final_gate-Alert
+    assert calls == {"generate": 1, "revise": 2}
     assert list(tmp_path.iterdir()) == []
-    assert len(sent) == 1 and sent[0][1] == "alert"
+    assert len(sent) == 1 and sent[0][1] == "monday"
+    assert "Faktenbriefing" in sent[0][0]
 
 
 def test_minor_verify_finding_does_not_block(monkeypatch, tmp_path, portfolio, transactions):
@@ -284,8 +316,10 @@ def test_dry_run_skips_generate_draft(monkeypatch, tmp_path, portfolio, transact
     assert "Dry-Run — kein LLM-Call" in content  # Platzhalter-Inhalt unveraendert
 
 
-def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Unerwarteter (nicht-LLM) Verify-Fehler -> fail-closed: Alert, kein Versand, keine Vault-Datei."""
+def test_fallback_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: Unerwarteter (nicht-LLM) Verify-Fehler -> Fallback-Versuch;
+    schlaegt auch die Fallback-Verifikation fehl, bleibt es beim technischen
+    Alert (kein Versand, keine Vault-Datei)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
@@ -302,12 +336,14 @@ def test_generic_verify_error_is_fail_closed(monkeypatch, tmp_path, portfolio, t
     assert list(tmp_path.iterdir()) == []  # keine Briefing-Datei
     assert len(sent) == 1  # nur Alert, kein Briefing-Versand
     assert sent[0][1] == "alert"
-    assert "verify failed" in sent[0][0]
+    assert "Fallback-Verify fehlgeschlagen" in sent[0][0]
     assert "interner Verify-Bug" in sent[0][0]
 
 
-def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """Separater LLMError-Pfad der Verifikation bleibt erhalten (fail-closed, Alert)."""
+def test_fallback_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
+    """Phase D: LLMError aus der Verifikation -> Fallback-Versuch; schlaegt
+    auch die Fallback-Verifikation fehl (LLMError), bleibt es beim
+    technischen Alert (fail-closed, kein Versand)."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
@@ -323,15 +359,16 @@ def test_verify_llm_error_path_is_fail_closed(monkeypatch, tmp_path, portfolio, 
     assert rc == 1
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
-    assert "verify failed (fail-closed)" in sent[0][0]
+    assert "Fallback-Verify fehlgeschlagen (fail-closed)" in sent[0][0]
 
 
 def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transactions):
-    """final_gate blockt (critical/major) -> Alert, Exit 1, kein Versand, keine Vault-Datei."""
+    """final_gate blockt (critical/major) -> nach Revisions-Loop (Budget
+    erschoepft) Alert, Exit 1, kein Versand, keine Vault-Datei."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    calls = _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    _mock_draft(monkeypatch)
 
     def _blocking_verify(facts_package, draft):
         return BLOCKING_VERIFICATION
@@ -341,6 +378,7 @@ def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transaction
     rc = run_briefing.run("monday", dry_run=False)
 
     assert rc == 1
+    assert calls == {"generate": 1, "revise": 2}  # Budget deterministisch erschoepft
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert "final_gate" in sent[0][0]
@@ -349,9 +387,9 @@ def test_gate_block_is_fail_closed(monkeypatch, tmp_path, portfolio, transaction
 def test_gate_alert_has_no_false_traceback(monkeypatch, tmp_path, portfolio, transactions):
     """Gate-Block-Alert darf keinen nutzlosen Traceback (NoneType) enthalten."""
     _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    _mock_draft(monkeypatch)
 
     def _blocking_verify(facts_package, draft):
         return BLOCKING_VERIFICATION
@@ -497,12 +535,16 @@ def test_snapshot_capture_error_is_fail_closed(monkeypatch, tmp_path, portfolio,
 
 
 def test_failed_run_discards_staged_snapshot(monkeypatch, tmp_path, portfolio, transactions):
-    """Fehler nach capture_staged (Draft-LLMError) -> staged verworfen, kein promote.
+    """Fehler nach capture_staged (kaputte Datenbasis + Draft-LLMError) ->
+    staged verworfen, kein promote, technischer Alert statt Fallback.
 
     Die produktive Baseline (snapshot.current.json) darf durch einen
     fehlgeschlagenen Lauf nie fortgeschrieben werden.
     """
     calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    monkeypatch.setattr(
+        analyze, "assess_data_quality", lambda p, prev: {"status": "implausible", "issues": ["negativer Wert"]}
+    )
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
     _mock_draft(monkeypatch, fail=llm_briefing.LLMError("API down"))
@@ -515,6 +557,7 @@ def test_failed_run_discards_staged_snapshot(monkeypatch, tmp_path, portfolio, t
     assert calls["discard_staged"] >= 1  # staged verworfen (Start-Cleanup + finally)
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
+    assert "Datenbasis nicht valide" in sent[0][0]
 
 
 def test_successful_run_promotes_staged(monkeypatch, tmp_path, portfolio, transactions):
@@ -538,11 +581,12 @@ def test_successful_run_promotes_staged(monkeypatch, tmp_path, portfolio, transa
 
 
 def test_staged_snapshot_not_promoted_on_gate_block(monkeypatch, tmp_path, portfolio, transactions):
-    """final_gate blockt -> staged verworfen, keine Promotion, kein Versand."""
+    """final_gate blockt (Budget nach Revisions-Loop erschoepft) -> staged
+    verworfen, keine Promotion, kein Versand."""
     calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
     sent = []
     monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
-    _mock_draft(monkeypatch)
+    _mock_draft_and_revise(monkeypatch, VALID_DRAFT)
 
     def _blocking_verify(facts_package, draft):
         return BLOCKING_VERIFICATION
@@ -558,3 +602,52 @@ def test_staged_snapshot_not_promoted_on_gate_block(monkeypatch, tmp_path, portf
     assert list(tmp_path.iterdir()) == []
     assert len(sent) == 1 and sent[0][1] == "alert"
     assert "final_gate" in sent[0][0]
+
+
+# --- Phase C2: Revisions-Loop im Orchestrator (real verify/final_gate) --------
+
+
+def test_revision_pass_promotes_staged_and_sends(monkeypatch, tmp_path, portfolio, transactions):
+    """FAIL->REVISION->PASS end-to-end: blockierter Initial-Draft, Revision
+    korrigiert -> final_gate PASS -> staged promoted -> Versand. Genau 2
+    LLM-Calls, Reihenfolge generate -> verify -> revise -> verify -> gate."""
+    order = []
+    calls = _mock_pipeline(monkeypatch, tmp_path, portfolio, transactions)
+    sent = []
+    monkeypatch.setattr(send_telegram, "send_briefing", _fake_send(sent))
+
+    def _generate(facts_package, mode="monday", client=None):
+        order.append("generate")
+        return "## Kurzlage\nOK"  # nur 1 Sektion -> verify findet critical
+
+    def _revise(facts_package, previous_draft, findings, mode="monday", client=None):
+        order.append("revise")
+        assert findings  # strukturierte blockierende Findings wurden uebergeben
+        return VALID_DRAFT
+
+    monkeypatch.setattr(llm_briefing, "generate_draft", _generate)
+    monkeypatch.setattr(llm_briefing, "revise_draft", _revise)
+
+    real_verify = verify.verify_draft
+
+    def _verify(facts_package, draft):
+        order.append("verify")
+        return real_verify(facts_package, draft)
+
+    monkeypatch.setattr(verify, "verify_draft", _verify)
+
+    real_gate = verify.final_gate
+
+    def _gate(verification):
+        order.append("gate")
+        return real_gate(verification)
+
+    monkeypatch.setattr(verify, "final_gate", _gate)
+
+    rc = run_briefing.run("monday", dry_run=False)
+
+    assert rc == 0
+    assert order == ["generate", "verify", "gate", "revise", "verify", "gate"]
+    assert calls["capture_staged"] == 1
+    assert calls["promote_staged"] == 1  # Revision-PASS promoted wie bisher
+    assert len(sent) == 1 and sent[0][1] == "monday"
