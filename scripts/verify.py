@@ -567,6 +567,17 @@ def _extract_tickers(text: str, facts_package: dict | None = None) -> set[str]:
         # vorkommen können — keine Ticker (Live-Fix: "KI-Thema" löste sonst
         # "Ticker/ISIN KI nicht im Portfolio" aus).
         "KI", "USA", "EU", "ESG", "RSS", "API",
+        # Häufige deutsche Großwörter (Funktionswörter/Adjektive), die als
+        # reine Großbuchstaben-Token im Draft vorkommen — keine Ticker.
+        # Live-Fix: der Großbuchstaben-Draft "KEINE" wurde sonst als Ticker-
+        # Kandidat eingestuft ("Ticker/ISIN KEINE nicht im Portfolio") und
+        # blockte den LLM-Draft 3× am Gate; die Blocklist deckte bisher nur
+        # "KI" ab. Die Kandidaten sind exakt die vom Regex erfassten
+        # Großbuchstaben-Token, daher genügt die Großschreibung (konsistent
+        # zur übrigen Blocklist).
+        "KEINE", "DER", "DIE", "DAS", "UND", "MIT", "NICHT", "FÜR",
+        "DEN", "EIN", "EINE", "ALS", "BEI", "AUS", "EINER", "AUF",
+        "NACH", "DEUTLICH", "AUCH",
         # ETF-Anteilsklasse (Acc): "ACC" ist gerenderter Namensbestandteil
         # von ETF-Holdings ("iShares MSCI World (Acc)"), kein Ticker — das
         # LLM schreibt sie auch als "(ACC)". Zusätzlich greift der Paket-

@@ -370,6 +370,107 @@ def test_alert_400_has_no_fallback_retry(monkeypatch, tmp_path):
     assert "parse_mode" not in payloads[0]
 
 
+# --- Markdown-Sanitizing: Unterstriche in Dateinamen (Live-Fix) -------------
+# "Abgelaufene Thesen: _index.md, verdicts.md" enthaelt ein einzelnes '_' —
+# Telegram Legacy-Markdown wertet das als Italic-Start und lehnt mit HTTP 400
+# "can't parse entities" ab. Eingebettete Unterstriche werden fuer den
+# Markdown-Versand escaped; der Plain-Text-Fallback bleibt als letztes Mittel.
+
+
+def _has_unclosed_italic(text: str) -> bool:
+    """True, wenn Legacy-Markdown eine ungeschlossene '_'-Italic-Entity hat.
+
+    Escapte Unterstriche (``\\_``) zaehlen nicht als Entity-Marker — analog
+    zur Telegram-Legacy-Markdown-Semantik.
+    """
+    return text.replace("\\_", "").count("_") % 2 != 0
+
+
+def test_escape_markdown_escapes_underscores_in_filenames():
+    """Unterstriche in Dateinamen/Identifiern werden escaped, Text bleibt sonst."""
+    assert send_telegram._escape_markdown("_index.md, verdicts.md") == "\\_index.md, verdicts.md"
+    assert send_telegram._escape_markdown("a_b_c") == "a\\_b\\_c"
+    assert send_telegram._escape_markdown("Kein Unterstrich") == "Kein Unterstrich"
+    # Bereits escapte Unterstriche werden nicht doppelt escaped.
+    assert send_telegram._escape_markdown("\\_index.md") == "\\_index.md"
+
+
+def test_markdown_with_underscore_filename_has_no_unclosed_entity(monkeypatch, tmp_path):
+    """Live-Fix: '_index.md' erzeugt keine ungeschlossene Italic-Entity und
+    wird sauber als Markdown zugestellt (kein Plain-Text-Fallback)."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if payload.get("parse_mode") == "Markdown" and _has_unclosed_italic(payload["text"]):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "description": "Bad Request: can't parse entities",
+                },
+                request=request,
+            )
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _handler)
+    markdown = BRIEFING + "\n\nAbgelaufene Thesen: _index.md, verdicts.md."
+
+    assert send_telegram.send_briefing(markdown, "monday") is True
+
+    assert len(payloads) == 1  # kein Fallback, der Markdown-Versand wurde akzeptiert
+    assert payloads[0]["parse_mode"] == "Markdown"
+    assert "\\_index.md" in payloads[0]["text"]  # Unterstrich escaped
+    assert "_index.md" in payloads[0]["text"]  # Inhalt bleibt lesbar
+    assert not _has_unclosed_italic(payloads[0]["text"])
+
+
+def test_markdown_sanitizing_preserves_content_and_chunking(monkeypatch, tmp_path):
+    """Sanitizing aendert nur die Entity-Marker, nicht den Inhalt pro Chunk;
+    die Chunk-Rekonstruktion des (escapten) Textes bleibt vollstaendig."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _capture)
+    markdown = BRIEFING + "\n\nAbgelaufene Thesen: _index.md, verdicts.md."
+
+    assert send_telegram.send_briefing(markdown, "monday") is True
+
+    original = _strip_frontmatter(markdown)
+    sent = "".join(p["text"] for p in payloads)
+    # Bis auf das Escape-Zeichen vor '_' identisch zum Original.
+    assert sent.replace("\\_", "_") == original
+    assert all(len(p["text"]) <= send_telegram.TELEGRAM_MAX_LEN for p in payloads)
+
+
+def test_bool_api_underscore_text_still_delivers(monkeypatch, tmp_path):
+    """Bool-API unveraendert: '_index.md' wird als Markdown zugestellt (True)."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _capture)
+
+    assert (
+        send_telegram._send_telegram(
+            FAKE_TOKEN, FAKE_CHAT_ID, "Abgelaufene Thesen: _index.md", "Markdown"
+        )
+        is True
+    )
+    assert len(payloads) == 1
+    assert payloads[0]["parse_mode"] == "Markdown"
+    assert not _has_unclosed_italic(payloads[0]["text"])
+
+
 # --- Volltext-Versand / Split-Logik (Phase 5) ------------------------------
 
 

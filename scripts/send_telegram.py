@@ -100,6 +100,25 @@ def _sanitize(text: str) -> str:
     return _TOKEN_IN_URL_RE.sub(_REDACTED, text)
 
 
+# Telegram Legacy-Markdown wertet ein einzelnes '_' als Start einer Italic-
+# Entity. Das Briefing ist reiner Text — Unterstriche in Dateinamen/Pfaden/
+# Identifiern (z.B. "_index.md") sind Literale, keine Markdown-Marker. Ohne
+# Escape lehnt Telegram den Versand mit HTTP 400 "can't parse entities" ab
+# (Live-Fix: "Abgelaufene Thesen: _index.md, verdicts.md"). Backslash-Escape
+# rendert das Literal, ohne Inhalt zu veraendern; bereits escapte Unterstriche
+# werden nicht doppelt escapt.
+_MARKDOWN_UNDERSCORE_RE = re.compile(r"(?<!\\)_")
+
+
+def _escape_markdown(text: str) -> str:
+    """Escaped Unterstriche fuer den parse_mode="Markdown"-Versand.
+
+    Nur der Markdown-Pfad wird escaped; der Plain-Text-Fallback bekommt den
+    unveraenderten Originaltext (dort sind Unterstriche unproblematisch).
+    """
+    return _MARKDOWN_UNDERSCORE_RE.sub(r"\\_", text)
+
+
 def _load_env() -> None:
     if ENV_PATH.exists():
         load_dotenv(ENV_PATH, override=True)
@@ -150,6 +169,12 @@ def _send_message(token: str, chat_id: str, text: str, parse_mode: str | None) -
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+        if parse_mode == "Markdown":
+            # Legacy-Markdown robuster machen: eingebettete Unterstriche
+            # (Dateinamen/Pfade/Identifier) werden escaped, damit keine
+            # ungeschlossene Italic-Entity entsteht (Telegram HTTP 400
+            # "can't parse entities"). Der Inhalt bleibt unveraendert.
+            payload["text"] = _escape_markdown(text)
     try:
         with httpx.Client(timeout=30) as client:
             with _suppress_http_request_logs():

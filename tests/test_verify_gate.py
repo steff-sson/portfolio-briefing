@@ -395,6 +395,43 @@ class TestVerifyDraft:
         assert any(f["severity"] == "major" and "MSFT" in f["issue"] for f in findings)
         assert not any("CORP" in f["issue"] for f in findings)
 
+    # --- Live-Fix: Deutsche Grosswoerter als Pseudo-Ticker (KEINE etc.) -------
+    # Der Grossbuchstaben-Draft "KEINE" wurde als Ticker-Kandidat eingestuft
+    # und blockte den LLM-Draft 3x ("Ticker/ISIN KEINE nicht im Portfolio").
+
+    def test_keine_as_german_text_is_not_a_ticker(self):
+        """Regression: 'KEINE' als deutsches Textwort blockt nicht mehr."""
+        draft = VALID_DRAFT.replace(
+            "Keine Sell-/Reduce-Signale.",
+            "KEINE Sell-/Reduce-Signale.",
+        )
+        assert verify.verify_draft(VALID_FACTS, draft) == []
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "KEINE", "DER", "DIE", "DAS", "UND", "MIT", "NICHT", "FÜR",
+            "DEN", "EIN", "EINE", "ALS", "BEI", "AUS", "EINER", "AUF",
+            "NACH", "DEUTLICH", "AUCH",
+        ],
+    )
+    def test_german_uppercase_draft_words_are_not_tickers(self, token):
+        """Alle deutschen Grosswoerter der Blocklist erzeugen kein Ticker-Finding."""
+        draft = VALID_DRAFT.replace(
+            "Apple (AAPL, US0378331005) bei 24.8%.",
+            f"Apple (AAPL, US0378331005) bei 24.8%. {token} ist ein Textwort.",
+        )
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert not any(f["issue"].startswith("Ticker/ISIN") for f in findings)
+
+    @pytest.mark.parametrize("ticker", ["NVDA", "GOOGL", "BNTX", "MSTR", "IONOS"])
+    def test_real_tickers_still_detected_with_german_word_blocklist(self, ticker):
+        """Regression: die deutsche Wortblocklist schliesst keine echten Ticker
+        aus — unbekannte echte Ticker bleiben weiterhin major."""
+        draft = VALID_DRAFT.replace("AAPL", ticker)
+        findings = verify.verify_draft(VALID_FACTS, draft)
+        assert any(f["severity"] == "major" and ticker in f["issue"] for f in findings)
+
     # --- Live-Fehler: Holding-Namen-Tokens (SRI/IMI/ADR) ohne Ticker-Feld -----
     # Holdings stehen im Portfolio nur über ISINs (kein Ticker-Feld). Echte
     # Namens-Bestandteile wie 'SRI'/'IMI'/'ADR' sind keine erfundenen Ticker —
