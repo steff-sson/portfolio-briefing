@@ -1012,9 +1012,28 @@ def test_strategy_hash_version_consistency():
 # --- P3: holdings_classification aus answers.reviewed.yaml emittieren ---------
 
 
-def _classification_answers(*items: tuple[str, dict]) -> dict:
-    """Antwort-Fixture: Planpfad holdings.classification.<ISIN> (value-Dict)."""
+def _answers_without_classification() -> dict:
+    """Antwort-Fixture ohne Klassifikations-Antworten (abwärtskompatibler Pfad).
+
+    Die reale, nicht versionierte config/setup/answers.reviewed.yaml kann
+    bestätigte Klassifikationen enthalten; der "keine Antworten"-Fall muss
+    daher explizit hergestellt werden, sonst ist die Erwartung nicht
+    deterministisch.
+    """
     answers = _answers_fixture()
+    for path in list(answers.get("answers", {})):
+        if path.startswith("holdings.classification."):
+            del answers["answers"][path]
+    return answers
+
+
+def _classification_answers(*items: tuple[str, dict]) -> dict:
+    """Antwort-Fixture: Planpfad holdings.classification.<ISIN> (value-Dict).
+
+    Basis ist bewusst klassifikations-frei, damit die Erwartungen unabhängig
+    von der realen, nicht versionierten answers.reviewed.yaml sind.
+    """
+    answers = _answers_without_classification()
     for isin, value in items:
         answers["answers"][f"holdings.classification.{isin}"] = {
             "value": value,
@@ -1072,7 +1091,7 @@ def test_emit_classification_schema_valid():
 
 def test_emit_classification_block_absent_when_missing():
     """Keine Klassifikations-Antworten -> kein Block, kein Fehler (abwärtskompatibel)."""
-    answers = _answers_fixture()
+    answers = _answers_without_classification()
     strategy = setup_strategy._emit_dict_from_answers(answers, analyze.load_strategy_schema())
     assert "holdings_classification" not in strategy
 
@@ -1138,7 +1157,7 @@ def test_emit_classification_full_flow(monkeypatch, tmp_path):
 
 def test_emit_without_classification_backward_compatible(monkeypatch, tmp_path):
     """emit() ohne Klassifikations-Antworten: kein Block, kein Fehler (Status quo)."""
-    answers = _answers_fixture()
+    answers = _answers_without_classification()
     result = _emit_with_answers(monkeypatch, tmp_path, answers)
     emitted = yaml.safe_load((tmp_path / "strategy.yaml").read_text(encoding="utf-8"))
     assert "holdings_classification" not in emitted

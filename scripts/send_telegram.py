@@ -133,7 +133,19 @@ def _retain_briefings(keep: int = RETAINED_BRIEFINGS) -> list[Path]:
     return removed
 
 
-def _send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None) -> bool:
+# Sendestatus der Einzelnachricht:
+# - SEND_SENT: sauberer Versand mit dem bevorzugten Format.
+# - SEND_FALLBACK: Markdown wurde von Telegram abgelehnt (HTTP 400), der
+#   Inhalt wurde als Plain-Text zugestellt (kein Datenverlust) — fuer den
+#   Briefing-Versand fail-closed KEIN sauberer Erfolg.
+# - SEND_FAILED: nicht zugestellt.
+SEND_SENT = "sent"
+SEND_FALLBACK = "fallback"
+SEND_FAILED = "failed"
+
+
+def _send_message(token: str, chat_id: str, text: str, parse_mode: str | None) -> str:
+    """Sendet eine Nachricht und liefert den Sendestatus (siehe Konstanten)."""
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
@@ -143,7 +155,7 @@ def _send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None) 
             with _suppress_http_request_logs():
                 resp = client.post(url, json=payload)
             resp.raise_for_status()
-        return True
+        return SEND_SENT
     except httpx.HTTPStatusError as e:
         # str(e) enthaelt die volle Request-URL — hier NIE loggen.
         status = e.response.status_code
@@ -154,20 +166,40 @@ def _send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None) 
             # der Retry laeuft mit parse_mode=None und faellt hier nicht rein.
             body = e.response.content.decode("utf-8", errors="replace")
             logger.error(
-                "Telegram send failed: HTTP %s %s (body: %s)",
+                "Telegram Markdown send rejected: HTTP %s %s (body: %s)",
                 status,
                 e.response.reason_phrase,
                 _sanitize(body),
             )
-            return _send_telegram(token, chat_id, text, None)
+            fallback = _send_message(token, chat_id, text, None)
+            if fallback == SEND_SENT:
+                # Inhalt ist angekommen (kein Datenverlust), aber das
+                # bevorzugte Format wurde verletzt. Als Fallback markieren,
+                # damit der Briefing-Versand nicht faelschlich Erfolg meldet.
+                logger.error(
+                    "Telegram Markdown send failed (HTTP %s); "
+                    "delivered as plain-text fallback",
+                    status,
+                )
+                return SEND_FALLBACK
+            return SEND_FAILED
         logger.error("Telegram send failed: HTTP %s %s", status, e.response.reason_phrase)
-        return False
+        return SEND_FAILED
     except httpx.RequestError as e:
         logger.error("Telegram send failed: %s", _sanitize(str(e)))
-        return False
+        return SEND_FAILED
     except Exception as e:
         logger.error("Telegram send failed: %s", _sanitize(str(e)))
-        return False
+        return SEND_FAILED
+
+
+def _send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None) -> bool:
+    """Bool-API fuer einfache Aufrufer (u.a. telegram_inbound-Canned-Ack).
+
+    Der Plain-Text-Fallback zaehlt hier als zugestellt (True) — diese Aufrufer
+    haben keinen Fail-closed-Anspruch auf das Markdown-Format.
+    """
+    return _send_message(token, chat_id, text, parse_mode) != SEND_FAILED
 
 
 def _split_into_chunks(text: str, max_len: int) -> list[str]:
@@ -234,6 +266,12 @@ def send_briefing(markdown: str, mode: str) -> bool:
     archiviert — Fehler-Alerts duerfen keine Briefing-Datei im Vault
     anlegen. Alerts laufen ohne parse_mode (Plain-Text), damit kein
     Legacy-Markdown-Fehler den Alert blockt.
+
+    Fail-closed: Liefert True NUR, wenn jede Nachricht mit dem bevorzugten
+    Format sauber zugestellt wurde. Wird der Markdown-Versand von Telegram
+    abgelehnt (HTTP 400) und der Inhalt als Plain-Text-Fallback zugestellt,
+    ist das kein sauberer Erfolg — die Methode liefert dann False (Alert +
+    Exit 1 im Orchestrator), ohne dass Inhalt verloren geht.
     """
     _load_env()
     token = os.getenv("TELEGRAM_TOKEN")
@@ -261,12 +299,23 @@ def send_briefing(markdown: str, mode: str) -> bool:
     parse_mode = "Markdown" if mode in _BRIEFING_MODES else None
     chunks = _split_into_chunks(text, TELEGRAM_MAX_LEN)
     ok = True
+    fallback_used = False
     for chunk in chunks:
-        if not _send_telegram(token, chat_id, chunk, parse_mode):
+        status = _send_message(token, chat_id, chunk, parse_mode)
+        if status == SEND_FALLBACK:
+            # Inhalt zugestellt, aber nur als Plain-Text: fail-closed kein
+            # sauberer Erfolg — der Orchestrator muss das als Sendefehler
+            # behandeln (Alert + Exit 1), nicht als "send completed".
+            fallback_used = True
+            ok = False
+        elif status == SEND_FAILED:
             ok = False
             # Rest nicht abbrechen: weitere Chunks trotzdem versuchen.
     if not ok:
-        print(f"Telegram send failed; archived to {archived}")
+        if fallback_used:
+            print(f"Telegram send degraded to plain text; archived to {archived}")
+        else:
+            print(f"Telegram send failed; archived to {archived}")
         return False
     return True
 

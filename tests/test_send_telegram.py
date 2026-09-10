@@ -219,8 +219,13 @@ def test_notification_modes_never_use_markdown_parse_mode(monkeypatch, tmp_path,
 # --- Markdown-400-Fallback -------------------------------------------------
 
 
-def test_markdown_400_falls_back_to_plain_text(caplog, monkeypatch, tmp_path):
-    """400 bei Markdown: Body diagnostisch geloggt, genau einmal Plain-Text-Retry -> True."""
+def test_markdown_400_falls_back_to_plain_text_and_reports_failure(caplog, monkeypatch, tmp_path):
+    """400 bei Markdown: genau ein Plain-Text-Retry ohne Inhaltsverlust.
+
+    Der Inhalt kommt vollstaendig als Plain-Text an (kein Datenverlust), der
+    degradierte Versand wird aber fail-closed als Fehlschlag gemeldet (False)
+    — kein "send completed"/Exit 0 bei verletztem Format-Contract.
+    """
     _patch_env(monkeypatch, tmp_path)
     payloads: list[dict] = []
 
@@ -242,14 +247,60 @@ def test_markdown_400_falls_back_to_plain_text(caplog, monkeypatch, tmp_path):
     _mock_client(monkeypatch, _handler)
     caplog.set_level(logging.ERROR, logger="scripts.send_telegram")
 
-    assert send_telegram.send_briefing(BRIEFING, "monday") is True
+    assert send_telegram.send_briefing(BRIEFING, "monday") is False
 
     assert len(payloads) == 2  # Original + genau ein Fallback, keine Schleife
     assert payloads[0]["parse_mode"] == "Markdown"
     assert "parse_mode" not in payloads[1]  # Retry als Plain-Text
+    assert payloads[1]["text"] == _strip_frontmatter(BRIEFING)  # kein Inhaltsverlust
     assert "can't parse entities" in caplog.text  # Diagnose-Body geloggt
     assert FAKE_TOKEN not in caplog.text
     assert "api.telegram.org" not in caplog.text
+
+
+def test_chunk_fallback_marks_send_failed_but_sends_remaining(monkeypatch, tmp_path):
+    """Ein Chunk degradiert auf Plain-Text: Gesamtsendung fail-closed False.
+
+    Der Rest wird trotzdem gesendet (kein Abbruch), der Inhalt geht nie
+    verloren — aber die Sendung gilt nicht als sauberer Erfolg.
+    """
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if payload.get("parse_mode") == "Markdown" and "# Portfolio-Briefing" in payload["text"]:
+            return httpx.Response(400, json={"ok": False, "description": "Bad Request"}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _handler)
+
+    assert send_telegram.send_briefing(_long_briefing(), "monday") is False
+
+    # chunk0 Markdown(400) + chunk0 Plain(200) + chunk1(200) + chunk2(200)
+    assert len(payloads) == 4
+    assert payloads[0].get("parse_mode") == "Markdown"
+    assert "parse_mode" not in payloads[1]  # Plain-Text-Fallback fuer chunk0
+    assert "## Sektion" in payloads[-1]["text"]  # Rest wurde zugestellt
+
+
+def test_send_telegram_bool_api_counts_fallback_as_delivered(monkeypatch, tmp_path):
+    """Bool-API (telegram_inbound-Canned-Ack): Plain-Text-Fallback gilt als zugestellt."""
+    _patch_env(monkeypatch, tmp_path)
+    payloads: list[dict] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if "parse_mode" in payload:
+            return httpx.Response(400, json={"ok": False, "description": "Bad Request"}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    _mock_client(monkeypatch, _handler)
+
+    assert send_telegram._send_telegram(FAKE_TOKEN, FAKE_CHAT_ID, "Ack", "Markdown") is True
+    assert len(payloads) == 2  # Original + genau ein Fallback
 
 
 def test_fallback_also_fails_returns_false_without_loop(caplog, monkeypatch, tmp_path):
