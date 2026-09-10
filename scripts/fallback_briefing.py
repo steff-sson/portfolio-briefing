@@ -53,43 +53,43 @@ _CATEGORY_GERMAN = {
     "data_quality": "Datenqualität",
 }
 
-# Einheitliche Ampel-Labels (Laiensicht-Revision): Der Status steht als
-# eckiges Klammer-Label (ROT/GELB/GRÜN) am Zeilenanfang, nicht als Wort.
-# "Status ok" wird zu [GRÜN] (nie das Wort "ok").
-_AMPEL = {"green": "[GRÜN]", "yellow": "[GELB]", "red": "[ROT]"}
+# Einheitliche Ampel-Symbole (Format C): Der Status steht als Emoji am
+# Zeilenanfang — nur das Emoji, kein Text-Label daneben.
+# "Status ok" wird zu 🟢 (nie das Wort "ok").
+_AMPEL = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 
 _AMPEL_POSITION = {
-    "grün": "[GRÜN]",
-    "gruen": "[GRÜN]",
-    "green": "[GRÜN]",
-    "ok": "[GRÜN]",
-    "gelb": "[GELB]",
-    "yellow": "[GELB]",
-    "unbewertet": "[GELB]",
-    "rot": "[ROT]",
-    "red": "[ROT]",
+    "grün": "🟢",
+    "gruen": "🟢",
+    "green": "🟢",
+    "ok": "🟢",
+    "gelb": "🟡",
+    "yellow": "🟡",
+    "unbewertet": "🟡",
+    "rot": "🔴",
+    "red": "🔴",
 }
 
 _AMPEL_DATA_QUALITY = {
-    "ok": "[GRÜN]",
-    "stale": "[GELB]",
-    "incomplete": "[GELB]",
-    "implausible": "[ROT]",
+    "ok": "🟢",
+    "stale": "🟡",
+    "incomplete": "🟡",
+    "implausible": "🔴",
 }
 
 # Gesamt-Empfehlung als Ampel: BUY = unauffällig, WATCH = beobachten,
 # SELL = Handlungsbedarf.
-_AMPEL_RECOMMENDATION = {"BUY": "[GRÜN]", "WATCH": "[GELB]", "SELL": "[ROT]"}
+_AMPEL_RECOMMENDATION = {"BUY": "🟢", "WATCH": "🟡", "SELL": "🔴"}
 
 # Signal-Labels der Sell-/Watchlist-Sektionen als Ampel (Rot = Verkauf/
 # Reduktion, Grün = Aufbau/Watchlist-Kauf, Gelb = reine Beobachtung).
 _AMPEL_SIGNAL = {
-    "SELL": "[ROT]",
-    "REDUCE": "[ROT]",
-    "AVOID": "[ROT]",
-    "BUY": "[GRÜN]",
-    "WATCH": "[GELB]",
-    "NO SIGNAL": "[GRÜN]",
+    "SELL": "🔴",
+    "REDUCE": "🔴",
+    "AVOID": "🔴",
+    "BUY": "🟢",
+    "WATCH": "🟡",
+    "NO SIGNAL": "🟢",
 }
 
 # Kurze, deterministische Bedeutung des Empfehlungs-Labels (ein Satz).
@@ -213,12 +213,12 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
     rec = summary.get("recommendation")
     if isinstance(rec, dict) and rec.get("label") in verify.RECOMMENDATION_LABELS:
         label = str(rec["label"])
-        ampel = _AMPEL_RECOMMENDATION.get(label, "[GELB]")
+        ampel = _AMPEL_RECOMMENDATION.get(label, "🟡")
         reason = rec.get("reason")
         reason_txt = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
         paragraphs.append(f"{ampel} Gesamturteil: {label}.{reason_txt}")
     else:
-        paragraphs.append("[GELB] Gesamturteil: keine deterministische Empfehlung (Analyse-Daten fehlen).")
+        paragraphs.append("🟡 Gesamturteil: keine deterministische Empfehlung (Analyse-Daten fehlen).")
 
     paragraphs.append(FALLBACK_MARKER + ". Deterministisch aus autoritativen Fakten; Status unverändert.")
 
@@ -230,14 +230,14 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
 
     unknown_sector = _has_unknown_sector(summary)
 
-    # Ampelzeilen: [ROT]/[GELB]/[GRÜN] am Zeilenanfang + Kategorie + reason
-    # (1:1 aus traffic_lights). "Status ok" steckt im [GRÜN]-Label, nicht im
+    # Ampelzeilen: 🔴/🟡/🟢 am Zeilenanfang + Kategorie + reason
+    # (1:1 aus traffic_lights). "Status ok" steckt im 🟢-Emoji, nicht im
     # Wort "ok".
     for key in _TRAFFIC_LIGHT_ORDER:
         light = lights.get(key)
         if not isinstance(light, dict):
             continue
-        ampel = _AMPEL.get(str(light.get("status")), "[GELB]")
+        ampel = _AMPEL.get(str(light.get("status")), "🟡")
         label = _CATEGORY_GERMAN.get(key, key)
         reason = _embed(light.get("reason"), allowed_fmt, allowed_2)
         if key == "data_quality":
@@ -296,7 +296,7 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
                 anteil = f"{round(float(weight) * 100, 1):.1f}% des Gesamtportfolios"
             else:
                 anteil = "unbewertet (kein Anteil)"
-            ampel = _AMPEL_POSITION.get(str(pos.get("status") or ""), "[GELB]")
+            ampel = _AMPEL_POSITION.get(str(pos.get("status") or ""), "🟡")
             paragraphs.append(f"{ampel} {name}: {anteil}.")
 
     # Sektor-Kurzfassung — Anteil ausdruecklich AM SATELLITE-UMFANG relativiert,
@@ -314,7 +314,7 @@ def _section_kurzlage(facts_package: dict, allowed_fmt: set[str], allowed_2: set
                 anteil = f"{round(float(ratio) * 100, 1):.1f}% der Satellite-Positionen"
             else:
                 anteil = "kein Anteil"
-            ampel = _AMPEL_POSITION.get(str(sec.get("status") or ""), "[GELB]")
+            ampel = _AMPEL_POSITION.get(str(sec.get("status") or ""), "🟡")
             line = f"{ampel} Satellite-Sektor {name}: {anteil}."
             if name.strip().lower() == "unknown":
                 line += " Keine Sektordaten hinterlegt (Datenlücke, keine echte Übergewichtung)."
@@ -331,7 +331,7 @@ def _section_datenqualitaet(facts_package: dict) -> str:
         issues = summary.get("data_quality_issues")
         dq = {"status": status, "issues": issues if isinstance(issues, list) else []}
     status = dq.get("status")
-    ampel = _AMPEL_DATA_QUALITY.get(str(status), "[GELB]") if isinstance(status, str) else "[GRÜN]"
+    ampel = _AMPEL_DATA_QUALITY.get(str(status), "🟡") if isinstance(status, str) else "🟢"
     status_txt = _DATA_QUALITY_STATUS_GERMAN.get(str(status), str(status or "ok")) if isinstance(status, str) else "in Ordnung"
     paragraphs = [f"{ampel} Datenqualität: {status_txt}."]
     issues = dq.get("issues")
@@ -352,7 +352,7 @@ def _signal_rows(signals: object, allowed_fmt: set[str], allowed_2: set[str]) ->
             continue
         name = str(signal.get("name") or signal.get("isin") or "?")
         sig = str(signal.get("signal") or "NO SIGNAL")
-        ampel = _AMPEL_SIGNAL.get(sig, "[GELB]")
+        ampel = _AMPEL_SIGNAL.get(sig, "🟡")
         score = signal.get("score")
         score_txt = ""
         if isinstance(score, int) and not isinstance(score, bool) and score != 0:
@@ -397,11 +397,11 @@ def _section_empfehlung(facts_package: dict) -> str:
     rec = _summary(facts_package).get("recommendation")
     if isinstance(rec, dict) and rec.get("label") in verify.RECOMMENDATION_LABELS:
         label = str(rec["label"])
-        ampel = _AMPEL_RECOMMENDATION.get(label, "[GELB]")
+        ampel = _AMPEL_RECOMMENDATION.get(label, "🟡")
         meaning = _RECOMMENDATION_MEANING.get(label, "")
         meaning_txt = f" — {meaning}" if meaning else ""
         return f"## Empfehlung\n\n{ampel} {label}{meaning_txt}"
-    return "## Empfehlung\n\n[GELB] Keine deterministische Empfehlung (Analyse-Daten fehlen)."
+    return "## Empfehlung\n\n🟡 Keine deterministische Empfehlung (Analyse-Daten fehlen)."
 
 
 def _section_naechster_schritt(facts_package: dict) -> str:

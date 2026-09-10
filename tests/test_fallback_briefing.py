@@ -1,7 +1,8 @@
 """Regressionstests fuer das deterministische Faktenbriefing (Phase D, Laiensicht).
 
-Fokus: reiner Text (keine Markdown-Tabellen/Sternchen/Emoji), einheitliche
-Ampel-Labels ([GRÜN]/[GELB]/[ROT]) am Zeilenanfang, Gesamtstatus in der ersten
+Fokus: reiner Text (keine Markdown-Tabellen/Sternchen), einheitliche
+Ampel-Emojis (🟢/🟡/🔴) am Zeilenanfang (Format C: nur Emoji, kein Text-Label),
+Gesamtstatus in der ersten
 Kurzlage-Zeile, Leerzeilen zwischen Stichpunkten, Kuerzung (Positionen nur als
 Name + Anteil + Status, keine ISIN-Flut), relativierte Sektor-Anteile
 ("% der Satellite-Positionen") mit Datenluecken-Hinweis, Anlagethesen-Klarheit,
@@ -73,58 +74,62 @@ def _package() -> dict:
     }
 
 
-_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\uFE0F]")
-
-
 def test_fallback_is_plain_text_without_markdown_markers():
-    """Der Fallback traegt keine Tabellen/Markdown-/Emoji-Marker, behaelt aber
-    die 6 Pflicht-Ueberschriften."""
+    """Der Fallback traegt keine Tabellen/Markdown-Marker, nutzt aber die
+    Ampel-Emojis und behaelt die 6 Pflicht-Ueberschriften."""
     text = fallback_briefing.build_fallback_briefing(_package())
     assert "|" not in text
     assert "**" not in text
     assert not re.search(r"^\s*\*\s", text, re.MULTILINE)
     assert "---" not in text
-    assert not _EMOJI_RE.search(text)
+    # Format C: die Ampel steht als Emoji (kein Text-Label).
+    assert "🟢" in text
+    assert "🟡" in text
+    assert "🔴" in text
     for section in verify.DRAFT_SECTIONS:
         assert re.search(rf"^{re.escape(section)}$", text, re.MULTILINE)
 
 
 def test_fallback_starts_with_overall_ampel_status():
-    """Erste Zeile der Kurzlage = Gesamtstatus als Ampel-Label; danach der
+    """Erste Zeile der Kurzlage = Gesamtstatus als Ampel-Emoji; danach der
     Fallback-Marker. Vor den Aufzaehlungspunkten steht das Ein-Satz-Fazit."""
     text = fallback_briefing.build_fallback_briefing(_package())
     kurzlage = verify._extract_section(text, "## Kurzlage")
     assert kurzlage is not None
     body_lines = [line for line in (verify._section_content(kurzlage) or "").splitlines() if line.strip()]
-    assert body_lines[0].startswith("[GELB] Gesamturteil: WATCH.")
+    assert body_lines[0].startswith("🟡 Gesamturteil: WATCH.")
     assert body_lines[1].startswith(fallback_briefing.FALLBACK_MARKER)
 
 
 def test_fallback_ampel_labels_are_consistent_and_ok_is_green():
-    """Ampel-Labels [GRÜN]/[GELB]/[ROT] stehen am Zeilenanfang; Status 'ok'
-    wird [GRÜN] (kein Wort 'ok'). Gesamtstatus prominent in Zeile 1."""
+    """Ampel-Emojis 🟢/🟡/🔴 stehen am Zeilenanfang; Status 'ok'
+    wird 🟢 (kein Wort 'ok'). Gesamtstatus prominent in Zeile 1."""
     text = fallback_briefing.build_fallback_briefing(_package())
-    assert "[GRÜN]" in text
-    assert "[GELB]" in text
-    assert "[ROT]" in text
-    # Position mit Status "ok" -> [GRÜN], nicht das Wort "ok".
-    assert "[GRÜN] Welt Core: 88.1% des Gesamtportfolios." in text
+    assert "🟢" in text
+    assert "🟡" in text
+    assert "🔴" in text
+    # Format C: kein Text-Label mehr neben dem Emoji.
+    assert "[GRÜN]" not in text
+    assert "[GELB]" not in text
+    assert "[ROT]" not in text
+    # Position mit Status "ok" -> 🟢, nicht das Wort "ok".
+    assert "🟢 Welt Core: 88.1% des Gesamtportfolios." in text
     assert "Status ok" not in text
-    # Datenqualitaet "ok" -> [GRÜN] "in Ordnung".
-    assert "[GRÜN] Datenqualität: in Ordnung." in text
+    # Datenqualitaet "ok" -> 🟢 "in Ordnung".
+    assert "🟢 Datenqualität: in Ordnung." in text
     # Ampelzeile in der Kurzlage nennt kein "ok".
-    assert "[GRÜN] Datenqualität unauffällig." in text
-    # Gesamtstatus-Label in der ersten Kurzlage-Zeile.
-    assert "[GELB] Gesamturteil: WATCH." in text
+    assert "🟢 Datenqualität unauffällig." in text
+    # Gesamtstatus-Emoji in der ersten Kurzlage-Zeile.
+    assert "🟡 Gesamturteil: WATCH." in text
 
 
 def test_fallback_has_blank_lines_between_bullets_and_after_headers():
     """Leerzeilen zwischen allen Stichpunkten und direkt nach jeder
     Sektions-Überschrift (Laiensicht-Lesbarkeit)."""
     text = fallback_briefing.build_fallback_briefing(_package())
-    assert "\n\n[ROT] Core-/Satelliten-Aufteilung:" in text
-    assert "\n\n[GELB] NVIDIA: 11.9% des Gesamtportfolios." in text
-    assert "\n\n[GRÜN] Welt Core: 88.1% des Gesamtportfolios." in text
+    assert "\n\n🔴 Core-/Satelliten-Aufteilung:" in text
+    assert "\n\n🟡 NVIDIA: 11.9% des Gesamtportfolios." in text
+    assert "\n\n🟢 Welt Core: 88.1% des Gesamtportfolios." in text
     for section in verify.DRAFT_SECTIONS:
         assert f"{section}\n\n" in text, f"keine Leerzeile nach {section}"
 
@@ -154,7 +159,7 @@ def test_fallback_sector_unknown_is_data_gap_not_concentration():
     """Sektor 'Unknown' wird als Datenlücke erklärt, nicht als echte
     Sektor-Konzentration (kein falscher Alarm)."""
     text = fallback_briefing.build_fallback_briefing(_package())
-    assert "[ROT] Satellite-Sektor Unknown: 100.0% der Satellite-Positionen." in text
+    assert "🔴 Satellite-Sektor Unknown: 100.0% der Satellite-Positionen." in text
     assert "keine Sektordaten hinterlegt" in text
     assert "Datenlücke, keine echte Übergewichtung" in text
 
@@ -171,7 +176,7 @@ def test_fallback_explains_expired_theses():
         {"file": "nvidia-thesis.md", "created": "2025-01-01"}
     ]
     text = fallback_briefing.build_fallback_briefing(package)
-    assert "[ROT] Thesen-Fristen:" in text
+    assert "🔴 Thesen-Fristen:" in text
     assert "Abgelaufene These heißt:" in text
     assert "geprüft oder erneuert" in text
 
@@ -183,7 +188,7 @@ def test_fallback_recommendation_is_label_plus_one_sentence():
         verify._extract_section(text, "## Empfehlung")
     ) or ""
     assert empfehlung.count("WATCH") == 1
-    assert "[GELB] WATCH —" in empfehlung
+    assert "🟡 WATCH —" in empfehlung
     assert "Kategorien" not in empfehlung  # keine Herleitung
     # Die Herleitung steht nur EINMAL (Kurzlage), nicht erneut in der Empfehlung.
     assert text.count("2 rot, 4 grün von 7 Kategorien") == 1
@@ -240,10 +245,11 @@ def test_fallback_option2_watchlist_observation_and_no_forecast():
     assert "Fundamentaldaten (Umsatz, Gewinn, Bewertung)" in watchlist
     # Option-2-Gate: keine positive Prognose-/Versprechens-Formulierung.
     assert verify._forecast_promise_violations(text) == []
-    # Reiner Text bleibt gewahrt (keine Tabellen/Sternchen/Emoji).
+    # Reiner Text bleibt gewahrt (keine Tabellen/Sternchen); die Ampel steht
+    # als Emoji (Format C).
     assert "|" not in text
     assert "**" not in text
-    assert not _EMOJI_RE.search(text)
+    assert "🟡" in text
 
 
 def test_fallback_with_watchlist_passes_own_verify_gate():

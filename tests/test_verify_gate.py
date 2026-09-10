@@ -952,7 +952,6 @@ class TestPlainTextOutput:
             ("| Name | Wert |\n|---|---|", "Tabelle"),
             ("**Wichtiger Hinweis**", "Fett"),
             ("\n* Punkt eins", "Bullet"),
-            ("🔴 Roter Punkt", "Emoji"),
         ],
     )
     def test_markdown_marker_is_major_and_blocks(self, addition, label):
@@ -968,12 +967,17 @@ class TestPlainTextOutput:
         draft = self._draft_with("- Ein normaler Aufzaehlungspunkt.")
         assert verify.verify_draft(VALID_FACTS, draft) == []
 
-    def test_ampel_labels_are_not_tickers_and_do_not_block(self):
-        """[ROT]/[GELB]/[GRÜN] sind Ampel-Labels (Laiensicht-Revision), keine
-        Ticker — sie duerfen nicht als 'Ticker nicht im Portfolio' blocken."""
-        draft = self._draft_with(
-            "[ROT] Sektorkonzentration. [GELB] Einzelposition. [GRÜN] Umschlag."
-        )
+    def test_emoji_ampel_is_not_a_plain_text_violation_but_table_is(self):
+        """Format C: Emojis (insb. 🔴/🟡/🟢) sind erlaubt; Tabellen bleiben ein
+        Plain-Text-Verstoss."""
+        assert verify._plain_text_violations("🔴 Rot. 🟡 Gelb. 🟢 Grün.") == []
+        assert "Markdown-Tabelle" in verify._plain_text_violations("| A | B |")
+
+    def test_ampel_emojis_are_not_tickers_and_do_not_block(self):
+        """🔴/🟡/🟢 sind Ampel-Symbole (Format C), keine Ticker — sie duerfen
+        nicht als 'Ticker nicht im Portfolio' blocken und nicht das
+        Plain-Text-Gate ausloesen."""
+        draft = self._draft_with("🔴 Sektorkonzentration. 🟡 Einzelposition. 🟢 Umschlag.")
         findings = verify.verify_draft(VALID_FACTS, draft)
         assert not any("nicht im Portfolio" in f["issue"] for f in findings)
         assert findings == []

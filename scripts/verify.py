@@ -583,10 +583,10 @@ def _extract_tickers(text: str, facts_package: dict | None = None) -> set[str]:
         # LLM schreibt sie auch als "(ACC)". Zusätzlich greift der Paket-
         # Ausschluss über _facts_name_words ("AC" ⊂ "acc").
         "ACC",
-        # Ampel-Labels (Laiensicht-Revision): [ROT]/[GELB]/[GRÜN] stehen am
-        # Zeilenanfang; ROT/GELB sind reine Großbuchstaben-Token und dürfen
-        # nie als Ticker gelten (GRÜN trifft der Ticker-Regex wegen Ü nicht).
-        "ROT", "GELB", "GRÜN",
+        # Hinweis (Format C): die Ampel steht als Emoji 🔴/🟡/🟢 am
+        # Zeilenanfang — Emojis sind keine [A-Z]-Token und koennen daher nie
+        # als Ticker-Kandidat erkannt werden. Eine Blocklist der alten
+        # Text-Labels [ROT]/[GELB]/[GRÜN] ist damit nicht mehr noetig.
     }
     candidates = set(re.findall(r"\b[A-Z]{2,5}(?:[-\.]?[A-Z]+)?\b", text))
     candidates -= common
@@ -830,27 +830,25 @@ def _forbidden_style_terms(text: str) -> list[str]:
     return found
 
 
-# Reiner-Text-Contract (Laiensicht): das Briefing enthaelt KEINE Markdown-
-# Tabellen, keine Fett-/Kursiv-Sterne, keine Stern-Bullets, keine Kopf-/
-# Trennzeilen und keine Emoji-Statuszeichen. Erlaubt bleiben die
+# Reiner-Text-Contract (Laiensicht, Format C): das Briefing enthaelt KEINE
+# Markdown-Tabellen, keine Fett-/Kursiv-Sterne, keine Stern-Bullets und keine
+# Kopf-/Trennzeilen. Die Ampel-Emojis 🔴/🟡/🟢 sind ausdruecklich erlaubt
+# (der Status steht als Emoji am Zeilenanfang). Erlaubt bleiben ebenso die
 # Pflicht-Ueberschriften (^## ...$) und "- "-artige Aufzaehlungszeilen.
 # (Die Ueberschriften selbst sind Teil des 6-Sektionen-Contracts.)
 _MARKDOWN_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 _MARKDOWN_RULE_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$", re.MULTILINE)
 _MARKDOWN_BOLD_RE = re.compile(r"(\*\*|__)")
 _MARKDOWN_STAR_BULLET_RE = re.compile(r"^\s*[*+]\s+", re.MULTILINE)
-_EMOJI_RE = re.compile(
-    "[\U0001F000-\U0001FAFF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\uFE0F]"
-)
 
 
 def _plain_text_violations(text: str) -> list[str]:
-    """Markdown-/Tabellen-/Emoji-Marker im reinen-Text-Briefing (Laiensicht).
+    """Markdown-/Tabellen-Marker im reinen-Text-Briefing (Laiensicht).
 
     Erkennt deterministisch: Markdown-Tabellenzeilen, Trenn-/Kopfzeilen,
-    Fett-/Kursiv-Sterne, Stern-Bullets und Emoji-Statuszeichen. Die
-    Pflicht-Ueberschriften (``## ...``) und ``- ``-Zeilen sind ausdruecklich
-    erlaubt und werden NICHT gemeldet.
+    Fett-/Kursiv-Sterne und Stern-Bullets. Emoji (insb. die Ampel-Symbole
+    🔴/🟡/🟢) sind ausdruecklich erlaubt und werden NICHT gemeldet. Die
+    Pflicht-Ueberschriften (``## ...``) und ``- ``-Zeilen ebenfalls nicht.
     """
     violations: list[str] = []
     if _MARKDOWN_TABLE_RE.search(text):
@@ -861,8 +859,6 @@ def _plain_text_violations(text: str) -> list[str]:
         violations.append("Fett-/Kursiv-Sternchen")
     if _MARKDOWN_STAR_BULLET_RE.search(text):
         violations.append("Stern-Bullet")
-    if _EMOJI_RE.search(text):
-        violations.append("Emoji-Statuszeichen")
     return violations
 
 
@@ -1267,17 +1263,17 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
                 "Durch verstaendliche deutsche Formulierung ersetzen (z.B. 'aktuelle Ausbaustufe' statt 'MVP')",
             )
         )
-    # 3a. Reiner-Text-Contract (Laiensicht): keine Markdown-Tabellen,
-    #     Fett-/Kursiv-Sternchen, Stern-Bullets, Trenn-/Kopfzeilen oder
-    #     Emoji-Statuszeichen. Pflicht-Ueberschriften und "- "-Zeilen bleiben
-    #     erlaubt.
+    # 3a. Reiner-Text-Contract (Laiensicht, Format C): keine Markdown-Tabellen,
+    #     Fett-/Kursiv-Sternchen, Stern-Bullets oder Trenn-/Kopfzeilen. Die
+    #     Ampel-Emojis 🔴/🟡/🟢 sind erlaubt, ebenso die Pflicht-Ueberschriften
+    #     und "- "-Zeilen.
     for violation in _plain_text_violations(text):
         findings.append(
             _finding(
                 "major",
                 f"Markdown-/Tabellen-Marker im Briefing ({violation})",
                 f"Draft enthaelt {violation}",
-                "Reinen Text ohne Tabellen/Sternchen/Emoji verwenden; Status als Wort (gruen/gelb/rot), Listen als '- '-Zeilen",
+                "Reinen Text ohne Tabellen/Sternchen/Trennzeilen verwenden; Ampel als Emoji 🔴/🟡/🟢, Listen als '- '-Zeilen",
             )
         )
     # 3b. Option-2-Contract (Laiensicht): keine Gewinn-/Kursprognose, kein

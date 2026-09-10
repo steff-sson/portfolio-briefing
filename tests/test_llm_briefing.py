@@ -651,20 +651,21 @@ def test_briefing_prompt_plain_text_and_redundancy_contract():
     content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
     assert "Reiner Text" in content
     assert "KEINE Markdown-Tabellen" in content
-    assert "keine Emoji" in content
+    assert "keine Emoji außer den Ampel-Symbolen 🔴/🟡/🟢" in content
     assert "Max. Anteil" in content
     assert "Wiederhole eine Position nicht in allen drei Sektionen" in content
     assert "GENAU EINMAL im Briefing" in content
 
 
 def test_briefing_prompt_ampel_labels_blank_lines_and_word_budget():
-    """Laiensicht-Revision: einheitliche Ampel-Labels am Zeilenanfang,
+    """Format C: einheitliche Ampel-Emojis am Zeilenanfang (kein Text-Label),
     Gesamtstatus in Kurzlage-Zeile 1, Leerzeilen-Regel und Wortbudget."""
     content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
-    assert "[GRÜN]" in content
-    assert "[GELB]" in content
-    assert "[ROT]" in content
-    assert 'Status "ok" wird als [GRÜN]' in content
+    assert "🟢" in content
+    assert "🟡" in content
+    assert "🔴" in content
+    assert 'Ein Status "ok" wird als 🟢 dargestellt' in content
+    assert "nur das Emoji, kein Text-Label" in content
     assert "ERSTE Zeile der Kurzlage" in content
     assert "Leerzeilen zwischen allen Stichpunkten" in content
     assert "400–450 Wörter" in content
@@ -694,7 +695,8 @@ def test_briefing_prompt_no_isin_flood_and_short_recommendation():
 def test_revise_prompt_ampel_labels_blank_lines_and_shortening():
     """revise.txt traegt dieselben neuen Format-/Kuerzungsregeln."""
     revise = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
-    assert "[GRÜN]/[GELB]/[ROT]" in revise
+    assert "🟢/🟡/🔴" in revise
+    assert "ohne Text-Label" in revise
     assert "Leerzeilen zwischen" in revise
     assert "400–450" in revise
     assert "Datenlücke" in revise

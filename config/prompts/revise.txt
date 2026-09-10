@@ -25,10 +25,10 @@ MANDAT:
   ## Empfehlung
   ## Nächster Schritt
 - Reiner Text: KEINE Markdown-Tabellen, keine Tabellen-/Trennzeilen (keine
-  senkrechten Striche), keine Sternchen für Fett/Kursiv, keine
-  Emoji-/Status-Symbole. Ampel-Status einheitlich als Klammer-Label am
-  Zeilenanfang: [GRÜN]/[GELB]/[ROT] (Status "ok" = [GRÜN]); Listen als
-  "- "-Zeilen. Gesamtstatus in der ersten Kurzlage-Zeile. Leerzeilen-Regel
+  senkrechten Striche), keine Sternchen für Fett/Kursiv, keine Emoji außer
+  den Ampel-Symbolen 🔴/🟡/🟢. Ampel-Status einheitlich als Emoji am
+  Zeilenanfang: 🟢/🟡/🔴 (Status "ok" = 🟢), nur das Emoji ohne Text-Label;
+  Listen als "- "-Zeilen. Gesamtstatus in der ersten Kurzlage-Zeile. Leerzeilen-Regel
   (zwingend, vor Auslieferung prüfen): Leerzeilen zwischen allen Stichpunkten.
   Zwischen zwei aufeinanderfolgenden Stichpunkten/-Zeilen MUSS eine Leerzeile stehen
   — nicht nur um Sektions-Überschriften; auch vor/nach jeder Sektions-Überschrift.
@@ -41,7 +41,7 @@ MANDAT:
   Einzelpositions-Band und Disclaimer je höchstens 1×; Sell-/Reduce- und
   Nächster-Schritt-Hinweise nicht dreifach wiederholen. Überflüssige
   Füll-Phrasen und wiederholte Erläuterungen streichen. Positionen nur in
-  Kürzform (Name + Anteil + Ampel-Label), keine vollständige ISIN-Liste.
+  Kürzform (Name + Anteil + Ampel-Emoji), keine vollständige ISIN-Liste.
 - Die Empfehlung ist Label + ein kurzer Satz (keine Herleitung). Bei roter
   Thesen-Ampel "abgelaufene These" laienverständlich erklären; "Unknown"-
   Sektoren als Datenlücke, nicht als echte Sektor-Konzentration darstellen.
