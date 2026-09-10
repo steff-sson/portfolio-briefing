@@ -6,6 +6,7 @@ und flossen als "Briefing" durch die Pipeline (Versand an Telegram).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 
 import pytest
@@ -142,6 +143,37 @@ def _facts_package() -> dict:
             "red_checks": ["drift", "sector_concentration", "single_position"],
             "yellow_checks": [],
             "green_checks": ["core_satellite", "turnover"],
+            # Phase 3/4a: Positions-/Sektor-Details (additive Fakten) — der
+            # Draft-Kontext reicht sie 1:1 an das Briefing durch.
+            "positions_detail": [
+                {
+                    "name": "Apple Inc.",
+                    "isin": "US0378331005",
+                    "category": "satellite",
+                    "value_eur": 2400.0,
+                    "weight": 0.5647,
+                    "limit_pct": 10.0,
+                    "status": "rot",
+                },
+                {
+                    "name": "Vanguard FTSE All-World",
+                    "isin": "IE00BK5BQT80",
+                    "category": "core",
+                    "value_eur": 1850.0,
+                    "weight": 0.4353,
+                    "limit_pct": None,
+                    "status": "ok",
+                },
+            ],
+            "sectors_detail": [
+                {
+                    "name": "Technology",
+                    "value_eur": 2400.0,
+                    "ratio": 1.0,
+                    "limit_pct": 20.0,
+                    "status": "red",
+                }
+            ],
         },
         "strategy_thresholds_pct": {
             "core_pct": 75.0,
@@ -246,6 +278,46 @@ def test_draft_context_reduces_raw_data():
     assert "rebalancing" not in context["strategy"]
 
 
+def test_draft_context_passes_positions_and_sectors_detail():
+    """Phase 4a: positions_detail/sectors_detail (additive Fakten aus
+    deterministic_summary) werden unveraendert in den Draft-Kontext
+    durchgereicht — Name/ISIN/Kategorie/Wert/Anteil/Limit/Status bleiben
+    erhalten (keine Reduktion, keine Neuberechnung)."""
+    package = _facts_package()
+    context = llm_briefing._draft_context(package)
+
+    assert context["positions_detail"] == package["deterministic_summary"]["positions_detail"]
+    assert context["sectors_detail"] == package["deterministic_summary"]["sectors_detail"]
+
+    satellite = next(p for p in context["positions_detail"] if p["isin"] == "US0378331005")
+    assert satellite == {
+        "name": "Apple Inc.",
+        "isin": "US0378331005",
+        "category": "satellite",
+        "value_eur": 2400.0,
+        "weight": 0.5647,
+        "limit_pct": 10.0,
+        "status": "rot",
+    }
+    core = next(p for p in context["positions_detail"] if p["isin"] == "IE00BK5BQT80")
+    assert core["category"] == "core"
+    assert core["limit_pct"] is None  # Core: kein Satellite-Limit
+
+    assert context["sectors_detail"][0]["name"] == "Technology"
+    assert context["sectors_detail"][0]["limit_pct"] == 20.0
+
+
+def test_draft_context_positions_detail_defaults_empty():
+    """Phase 4a (defensiv): fehlen positions_detail/sectors_detail im Paket
+    (z.B. alte Faktenpakete), bleibt der Kontext ohne Crash bei leeren Listen."""
+    package = _facts_package()
+    package["deterministic_summary"].pop("positions_detail", None)
+    package["deterministic_summary"].pop("sectors_detail", None)
+    context = llm_briefing._draft_context(package)
+    assert context["positions_detail"] == []
+    assert context["sectors_detail"] == []
+
+
 def test_draft_prompt_contains_serialized_facts_package(monkeypatch):
     """1-Call-Architektur: Draft-Prompt (briefing.txt) enthaelt das serialisierte
     Faktenpaket (inkl. Rohdaten) — der einzige LLM-Call sieht die volle
@@ -319,6 +391,119 @@ def test_format_allowed_pct_list_empty_is_fail_closed():
     assert llm_briefing._format_allowed_pct_list(facts) == (
         "ZULÄSSIGE ZAHLEN: (keine — keine Prozentwerte zulässig)"
     )
+
+
+# --- Phase A: gemeinsame autoritative Allowlist (Prompt == Verify) ------------
+# llm_briefing._zulaessige_zahlen_block nutzt exakt verify.build_allowed_numbers
+# (7 Quellen: summary, thresholds, Holdings-Gewichte, TERs, positions_detail,
+# sectors_detail, Watchlist-Scores) — eine Divergenz zwischen der
+# ZULÄSSIGE-ZAHLEN-Liste im Prompt und der Gate-Allowlist ist ausgeschlossen.
+
+
+def _zahlen_liste_aus_block(block: str) -> list[str]:
+    """Zahlen-Tokens der ZULÄSSIGE-ZAHLEN-Liste (Zeile nach der Ueberschrift)."""
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("## ZULÄSSIGE ZAHLEN"):
+            return re.findall(r"-?\d+(?:\.\d+)?", lines[index + 1])
+    raise AssertionError("Kein ZULÄSSIGE-ZAHLEN-Block gefunden")
+
+
+def test_zulaessige_zahlen_block_matches_verify_allowlist():
+    """Phase A: Prompt-Allowlist == Verify-Allowlist.
+
+    Die ZULÄSSIGE-ZAHLEN-Liste des Prompts enthaelt exakt die Werte von
+    verify.build_allowed_numbers — formatiert wie das Gate sie akzeptiert
+    (>= 1.0: 1 Dezimalstelle, < 1.0: 2 Dezimalstellen). Die Werte liegen als
+    fertige Prozentwerte vor, das LLM kopiert sie woertlich (kein Runden,
+    kein Umrechnen).
+    """
+    from scripts import verify
+
+    facts = _facts_package()
+    block = llm_briefing._zulaessige_zahlen_block(facts)
+    listed = set(_zahlen_liste_aus_block(block))
+    expected = {
+        (f"{value:.2f}" if value < 1.0 else f"{value:.1f}")
+        for value in verify.build_allowed_numbers(facts)
+    }
+    assert listed == expected
+
+
+def test_zulaessige_zahlen_block_enthaelt_detail_prozentwerte():
+    """Phase A: positions_detail/sectors_detail-Werte erscheinen als fertige
+    Prozentwerte in der ZULÄSSIGE-ZAHLEN-Liste — weight-Ratio 0.6667 -> 66.7,
+    Sektor-Ratio 1.0 -> 100.0, Satellite-Limits 10.0/20.0 1:1. Das LLM sieht
+    die Prozentwerte und muss keine Ratio->%-Berechnung durchfuehren."""
+    facts = {
+        "deterministic_summary": {
+            "positions_detail": [
+                {
+                    "name": "iShares Core MSCI EM IMI",
+                    "isin": "IE00BKM4GZ66",
+                    "category": "core",
+                    "weight": 0.6667,
+                    "limit_pct": None,
+                },
+                {
+                    "name": "NVIDIA",
+                    "isin": "US67066G1040",
+                    "category": "satellite",
+                    "weight": 0.3333,
+                    "limit_pct": 10.0,
+                },
+            ],
+            "sectors_detail": [
+                {"name": "Technology", "ratio": 1.0, "limit_pct": 20.0},
+            ],
+        },
+        "strategy_thresholds_pct": {},
+        "portfolio": {"holdings": []},
+    }
+    block = llm_briefing._zulaessige_zahlen_block(facts)
+    listed = set(_zahlen_liste_aus_block(block))
+    assert {"66.7", "33.3", "10.0", "100.0", "20.0"} <= listed
+    # Keine Ratio-Reste in der Liste: 0.6667/0.3333/1.0 duerfen nicht als
+    # Verhaeltniszahlen erscheinen (nur die fertigen Prozentwerte).
+    assert not {"0.6667", "0.3333", "1.0"} & listed
+
+
+def test_draft_prompt_allowlist_equals_verify_allowlist(monkeypatch):
+    """Phase A: der assemblierte Draft-Prompt (briefing.txt + serialisiertes
+    Paket + ZULÄSSIGE-ZAHLEN-Block) enthaelt exakt die verify-Allowlist —
+    inkl. positions_detail/sectors_detail-Werte, die das Gate 1:1 prueft."""
+    from scripts import verify
+
+    captured: dict = {}
+
+    class _CaptureCompletions:
+        def create(self, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _FakeResponse("## Kurzlage\nOK")
+
+    class _CaptureChat:
+        completions = _CaptureCompletions()
+
+    class _CaptureClient:
+        chat = _CaptureChat()
+
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _CaptureClient())
+    monkeypatch.setattr(llm_briefing.time, "sleep", lambda seconds: None)
+
+    facts = _facts_package()
+    llm_briefing.generate_draft(facts, mode="monday")
+    prompt = captured["messages"][1]["content"]
+
+    block = prompt[prompt.index("## ZULÄSSIGE ZAHLEN") :]
+    listed = set(_zahlen_liste_aus_block(block))
+    expected = {
+        (f"{value:.2f}" if value < 1.0 else f"{value:.1f}")
+        for value in verify.build_allowed_numbers(facts)
+    }
+    assert listed == expected
+    # Detail-Werte sind in der Prompt-Liste (Phase 4b-Quellen fehlten vorher):
+    # Sektor-Ratio 1.0 -> 100.0, Satellite-Sektorlimit 20.0.
+    assert {"100.0", "20.0"} <= listed
 
 
 def test_draft_prompt_contains_formatted_allowlist(monkeypatch):
@@ -403,11 +588,63 @@ def test_briefing_prompt_contains_disclaimer_wording_and_news_instruction():
     assert "news" in content.lower()
 
 
+def test_briefing_prompt_extended_section_content_phase_4a():
+    """Phase 4a: briefing.txt erweitert den Inhalt der 6 Sektionen kompakt —
+    Kurzlage startet mit schnellem Überblick (Gesamturteil, Ampelzeilen,
+    Gesamtwert/Bewertungsgrundlage, Core-/Satellite-Anteile mit Ziel),
+    Positions-/Sektor-Details mit den Detail-Feldern, Core-ETFs nie als
+    Satellite-REDUCE; Datenqualitaet separat; Empfehlung und Naechster
+    Schritt klar getrennt (Datenproblem jetzt pruefen, strukturelle Themen
+    zur vierteljaehrlichen Strategiesitzung, keine Soforttransaktion)."""
+    content = (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+
+    # Kurzlage: schneller Überblick zuerst — Gesamturteil, Ampeln, Gesamtwert,
+    # Core-/Satellite-Anteile mit Ziel aus den deterministischen Paket-Feldern.
+    assert "schnellen Überblick" in content
+    assert "Gesamturteil" in content
+    assert "traffic_lights" in content
+    assert "total_value_eur" in content
+    assert "Core-Ziel" in content
+    assert "core_ratio" in content
+
+    # Konkrete Positionen/Sektoren mit Name, ISIN, Kategorie, Wert, Anteil,
+    # Limit, Status — additive Faktenfelder positions_detail/sectors_detail.
+    assert "positions_detail" in content
+    assert "sectors_detail" in content
+    assert "limit_pct" in content
+    assert "Core-ETFs niemals als Satellite-REDUCE" in content
+
+    # Datenqualitaet als eigene Sektion (Problem separat erklaeren).
+    assert "Datenprobleme gehören in diese Sektion" in content
+
+    # Empfehlung vs. Naechster Schritt: Datenproblem jetzt pruefen, strukturelle
+    # Themen zur vierteljaehrlichen Strategiesitzung, keine Soforttransaktion.
+    assert "1:1 aus deterministic_summary.recommendation" in content
+    assert "jetzt prüfen" in content
+    assert "vierteljährlichen Strategiesitzung" in content
+    assert "keine Soforttransaktion" in content
+
+    # 6-Sektionen-Contract unveraendert: Ueberschriften bleiben exakt.
+    sections = [
+        "## Kurzlage",
+        "## Datenqualität",
+        "## Sell-/Reduce-Signale (bestehende Satellites)",
+        "## Watchlist-Signale",
+        "## Empfehlung",
+        "## Nächster Schritt",
+    ]
+    pos = -1
+    for section in sections:
+        idx = content.index(section)
+        assert idx > pos, f"Sektion {section} nicht in Contract-Reihenfolge"
+        pos = idx
+
+
 def test_only_single_prompt_file_and_setup_exists():
-    """1-Call-Architektur: nur briefing.txt + q4_tax_context.txt + setup_system.txt —
-    keine geloeschten Mode-/Humanize-/Review-/Revise-Prompts."""
+    """Prompt-Dateien: briefing.txt + revise.txt + q4_tax_context.txt +
+    setup_system.txt — keine geloeschten Mode-/Humanize-/Review-Prompts."""
     prompts = sorted(p.name for p in llm_briefing.PROMPTS_DIR.iterdir())
-    assert prompts == ["briefing.txt", "q4_tax_context.txt", "setup_system.txt"]
+    assert prompts == ["briefing.txt", "q4_tax_context.txt", "revise.txt", "setup_system.txt"]
 
 
 def test_load_prompt_fills_facts_placeholder():
@@ -548,3 +785,374 @@ def test_load_prompt_open_points_not_in_facts_json():
     prompt = llm_briefing._load_prompt("monday", context)
     # Der untrusted Block ist der EINZIGE Ort mit dem Punkt; keine Duplikation.
     assert prompt.count("Sektorlimit anpassen?") == 1
+
+
+# --- LLM-Faktenfix (Live-Lauf): 11,9% + EZB vorab per Prompt verhindern ------
+# Der kontrollierte Live-Lauf zeigte zwei Draft-Fehler: eine nicht erlaubte
+# Zahl (11,9%) und den nicht im Portfolio vorhandenen Begriff EZB.
+# verify.final_gate blockte korrekt (fail-closed) — die Prompt-Haertung soll
+# solche Drafts gar nicht erst erzeugen. Verify bleibt unveraendert strikt.
+
+
+def _briefing_prompt_text() -> str:
+    return (llm_briefing.PROMPTS_DIR / "briefing.txt").read_text(encoding="utf-8")
+
+
+def test_briefing_prompt_blocking_number_source_rule():
+    """Live-Fix: Zahlen ausschliesslich 1:1 aus autoritativen Paket-Feldern
+    (deterministic_summary/positions_detail/sectors_detail, thresholds,
+    TERs, Allowlist) — berechnen/runden/summieren/ableiten/schaetzen sind
+    explizit blockierend verboten (kein neuer Beispielwert)."""
+    content = _briefing_prompt_text()
+    assert "ZAHLEN-QUELLEN-REGEL" in content
+    assert "ausschließlich 1:1 aus einem autoritativen Fakten-Feld des Pakets" in content
+    assert "deterministic_summary" in content
+    assert "strategy_thresholds_pct" in content
+    assert "ZULÄSSIGE-ZAHLEN-Liste" in content
+    assert "Prozentwerte niemals berechnen, runden, summieren, aus Text ableiten oder schätzen" in content
+    assert "kein Ableiten aus anderen Zahlen oder aus News-Text" in content
+
+
+def test_briefing_prompt_blocking_instrument_rule():
+    """Live-Fix: Ticker/ISIN/Instrumente ausschliesslich aus den gelieferten
+    Portfolio-Holdings/positions_detail/news-Inputs — keine externen
+    Instrumente, Institutionen oder Beispiele wie EZB."""
+    content = _briefing_prompt_text()
+    assert "TICKER-/INSTRUMENTE-REGEL" in content
+    assert "ausschließlich aus den gelieferten Portfolio-Holdings" in content
+    assert "positions_detail/sectors_detail" in content
+    assert "Watchlist-Signalen" in content
+    assert "News-Inputs" in content
+    assert "keine externen Instrumente, Institutionen" in content
+    assert "auch nicht als Vergleich oder Kontext" in content
+
+    # EZB erscheint NUR als verbotenes Negativ-Beispiel, nie als Vorbild.
+    ezb_lines = [line for line in content.splitlines() if "EZB" in line]
+    assert ezb_lines
+    assert all("keine" in line for line in ezb_lines)
+
+
+def test_briefing_prompt_blocking_not_substantiated_rule():
+    """Live-Fix: nicht mit autoritativen Fakten belegbare Befunde weglassen
+    oder ausdruecklich als 'nicht belegt' formulieren — ohne neue Zahl."""
+    content = _briefing_prompt_text()
+    assert "NICHT-BELEGT-REGEL" in content
+    assert "Jeder Befund muss sich direkt auf ein autoritatives Fakten-Feld des Pakets stützen" in content
+    assert "nicht belegt" in content
+    assert "ohne neue Zahl, ohne Prozentwert, ohne Schätzung" in content
+
+
+def test_briefing_prompt_has_no_fabricated_percent_example():
+    """Live-Fix-Regression: '11,9%' darf NICHT als Beispielwert im
+    Produktionsprompt stehen — weder Komma- noch Punkt-Schreibweise."""
+    content = _briefing_prompt_text()
+    assert "11,9" not in content
+    assert "11.9" not in content
+
+
+def test_loaded_prompt_new_rules_do_not_break_facts_handover(monkeypatch):
+    """Die neuen HARTE REGELN aendern die Fakten-Uebergabe nicht: der
+    assemblierte Prompt (briefing.txt + serialisiertes Paket + Allowlist)
+    enthaelt weiterhin deterministic_summary/positions_detail und die
+    6 Sektionen — zusaetzlich die neuen Blocking-Regeln, ohne 11,9-Wert."""
+    captured: dict = {}
+
+    class _CaptureCompletions:
+        def create(self, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _FakeResponse("## Kurzlage\nOK")
+
+    class _CaptureChat:
+        completions = _CaptureCompletions()
+
+    class _CaptureClient:
+        chat = _CaptureChat()
+
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _CaptureClient())
+    monkeypatch.setattr(llm_briefing.time, "sleep", lambda seconds: None)
+
+    llm_briefing.generate_draft(_facts_package(), mode="monday")
+    prompt = captured["messages"][1]["content"]
+
+    # Fakten-Uebergabe unveraendert (1-Call-Architektur).
+    assert '"deterministic_summary"' in prompt
+    assert '"positions_detail"' in prompt
+    assert "## ZULÄSSIGE ZAHLEN" in prompt
+    # Neue Blocking-Regeln sind im assemblierten Prompt aktiv.
+    assert "ZAHLEN-QUELLEN-REGEL" in prompt
+    assert "TICKER-/INSTRUMENTE-REGEL" in prompt
+    assert "NICHT-BELEGT-REGEL" in prompt
+    # Kein fabrizierter Beispielwert (Live-Fix).
+    assert "11,9" not in prompt
+    assert "11.9" not in prompt
+    # 6-Sektionen-Contract unveraendert.
+    for section in (
+        "## Kurzlage",
+        "## Datenqualität",
+        "## Sell-/Reduce-Signale (bestehende Satellites)",
+        "## Watchlist-Signale",
+        "## Empfehlung",
+        "## Nächster Schritt",
+    ):
+        assert section in prompt
+
+
+# --- Phase C1: revise_draft (Revision, kein Loop) ------------------------------
+# revise_draft korrigiert einen verify-blockierten Draft mit UNVERAENDERTEM
+# Faktenpaket + Draft + strukturierten Findings — nur der Revisions-Prompt
+# (config/prompts/revise.txt) wird aufgerufen, kein Verify-/Analyse-/Fallback.
+
+
+def test_revise_prompt_has_placeholders_and_correction_mandate():
+    """revise.txt: Platzhalter {facts}/{draft}/{findings}, 6-Sektionen-Contract
+    und das Korrektur-Mandat (Fakten autoritativ, nur Findings adressieren,
+    keine neuen Zahlen/ISINs/Instrumente, keine Meta-Kommentare)."""
+    content = (llm_briefing.PROMPTS_DIR / "revise.txt").read_text(encoding="utf-8")
+    for placeholder in ("{facts}", "{draft}", "{findings}"):
+        assert placeholder in content
+
+    # Fakten sind autoritativ; Draft nur korrigieren; alle Findings abarbeiten.
+    assert "Faktenpaket ist autoritativ" in content
+    assert "Korrigiere NUR das, was ein Finding adressiert" in content
+    assert "ALLE Findings" in content
+    # Keine neuen Zahlen/ISINs/Instrumente, 6 Sektionen exakt, keine Meta-Kommentare.
+    assert "KEINE neuen Fakten" in content
+    assert "KEINE neuen Zahlen" in content
+    assert "KEINE neuen ISINs" in content
+    assert "KEINE neuen Instrumente" in content
+    assert "KEINE Meta-Kommentare" in content
+    for section in (
+        "## Kurzlage",
+        "## Datenqualität",
+        "## Sell-/Reduce-Signale (bestehende Satellites)",
+        "## Watchlist-Signale",
+        "## Empfehlung",
+        "## Nächster Schritt",
+    ):
+        assert section in content
+    assert "NUR mit dem vollständigen, korrigierten" in content
+    assert "Briefing-Markdown (alle 6 Sektionen)" in content
+
+
+def test_format_findings_for_prompt_structured():
+    """_format_findings_for_prompt serialisiert Findings strukturiert als
+    nummerierte Bloecke mit severity/issue/evidence/correction — kein freier
+    Text, kein JSON-Verbund."""
+    formatted = llm_briefing._format_findings_for_prompt(
+        [
+            {
+                "severity": "critical",
+                "issue": "Zahl 45.0% nicht erlaubt",
+                "evidence": "45.0% steht nicht in der ZULÄSSIGE-ZAHLEN-Liste",
+                "correction": "Prozentwert entfernen",
+            },
+            {
+                "severity": "major",
+                "issue": "ISIN nicht im Portfolio",
+                "evidence": "Draft nennt DE0000000001",
+                "correction": "Unbekannte ISIN durch gueltige ersetzen oder entfernen",
+            },
+        ]
+    )
+    assert "Finding 1 [critical]: Zahl 45.0% nicht erlaubt" in formatted
+    assert "  Problem: 45.0% steht nicht in der ZULÄSSIGE-ZAHLEN-Liste" in formatted
+    assert "  Korrektur: Prozentwert entfernen" in formatted
+    assert "Finding 2 [major]: ISIN nicht im Portfolio" in formatted
+    assert "  Korrektur: Unbekannte ISIN durch gueltige ersetzen oder entfernen" in formatted
+
+
+def test_format_findings_for_prompt_empty():
+    """Ohne Findings bleibt die Serialisierung leer — kein Crash."""
+    assert llm_briefing._format_findings_for_prompt([]) == ""
+
+
+def test_revise_draft_prompt_contains_facts_draft_findings(monkeypatch):
+    """Der Revisions-Prompt (revise.txt) erhaelt Faktenpaket (JSON), Draft und
+    strukturierte Findings — in der Reihenfolge des Templates, mit
+    ZULÄSSIGE-ZAHLEN-Allowlist danach."""
+    captured: dict = {}
+
+    class _CaptureCompletions:
+        def create(self, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _FakeResponse("## Kurzlage\nOK")
+
+    class _CaptureChat:
+        completions = _CaptureCompletions()
+
+    class _CaptureClient:
+        chat = _CaptureChat()
+
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _CaptureClient())
+
+    facts = _facts_package()
+    draft = (
+        "## Kurzlage\nGesamtwert 4250.0 Euro, Position Apple Inc.\n"
+        "## Empfehlung\nWATCH"
+    )
+    findings = [
+        {
+            "severity": "critical",
+            "issue": "Zahl 45.0% nicht erlaubt",
+            "evidence": "45.0% steht nicht in der Allowlist",
+            "correction": "Prozentwert entfernen",
+        }
+    ]
+    llm_briefing.revise_draft(facts, draft, findings, mode="monday")
+    prompt = captured["messages"][1]["content"]
+
+    # revise.txt-Template: Platzhalter ersetzt, keine Reste.
+    assert "{facts}" not in prompt
+    assert "{draft}" not in prompt
+    assert "{findings}" not in prompt
+    assert "Du korrigierst einen Portfolio-Briefing-Draft." in prompt
+
+    # Faktenpaket 1:1 serialisiert (deterministische Quelle sichtbar).
+    assert '"deterministic_summary"' in prompt
+    assert '"US0378331005"' in prompt
+    assert '"total_value_eur": 4250.0' in prompt
+    # Draft unveraendert uebergeben.
+    assert "Gesamtwert 4250.0 Euro, Position Apple Inc." in prompt
+    # Findings strukturiert uebergeben.
+    assert "Finding 1 [critical]: Zahl 45.0% nicht erlaubt" in prompt
+    assert "  Korrektur: Prozentwert entfernen" in prompt
+    # Allowlist haengt nach dem Template (gleiche Quelle wie verify).
+    assert prompt.index("## ZULÄSSIGE ZAHLEN") > prompt.index("Finding 1 [critical]")
+
+
+def test_revise_draft_returns_corrected_draft(monkeypatch):
+    """revise_draft gibt die LLM-Antwort (korrigierter Draft) unveraendert
+    zurueck — kein verify-Aufruf, kein Loop, keine Umbauten."""
+    corrected = "## Kurzlage\nKorrigiert\n## Empfehlung\nWATCH"
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _FakeClient(content=corrected))
+    result = llm_briefing.revise_draft(
+        _facts_package(),
+        "## Kurzlage\nAlt",
+        [{"severity": "critical", "issue": "x", "evidence": "y", "correction": "z"}],
+        mode="monday",
+    )
+    assert result == corrected
+
+
+def test_revise_draft_api_call_parameters(monkeypatch):
+    """API-Aufruf nutzt denselben Mechanismus wie generate_draft
+    (deepseek-v4-flash, System-Prompt, max_tokens 4096, timeout 60) —
+    deterministischer: temperature 0.2."""
+    captured: dict = {}
+
+    class _CaptureCompletions:
+        def create(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return _FakeResponse("## Kurzlage\nOK")
+
+    class _CaptureChat:
+        completions = _CaptureCompletions()
+
+    class _CaptureClient:
+        chat = _CaptureChat()
+
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _CaptureClient())
+
+    llm_briefing.revise_draft(_facts_package(), "## Kurzlage\nAlt", [], mode="monday")
+    kwargs = captured["kwargs"]
+    assert kwargs["model"] == "deepseek-v4-flash"
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["max_tokens"] == 4096
+    assert kwargs["timeout"] == 60
+    assert kwargs["messages"][0] == {
+        "role": "system",
+        "content": "Du bist ein präziser Portfoliobeobachter.",
+    }
+    assert kwargs["messages"][1]["role"] == "user"
+    assert kwargs["messages"][1]["content"]
+
+
+def test_revise_draft_uses_passed_client(monkeypatch):
+    """Client-Parameter wird genutzt (testbar, kein _get_client-Aufruf noetig)."""
+    captured: dict = {}
+
+    class _CaptureCompletions:
+        def create(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return _FakeResponse("## Kurzlage\nOK")
+
+    class _CaptureChat:
+        completions = _CaptureCompletions()
+
+    class _CaptureClient:
+        chat = _CaptureChat()
+
+    def _unexpected_get_client():
+        raise AssertionError("_get_client darf nicht aufgerufen werden")
+
+    monkeypatch.setattr(llm_briefing, "_get_client", _unexpected_get_client)
+    llm_briefing.revise_draft(_facts_package(), "## Kurzlage\nAlt", [], client=_CaptureClient())
+    assert captured["kwargs"]["messages"][1]["role"] == "user"
+
+
+def test_revise_draft_timeout_raises_llm_error(monkeypatch):
+    """API-/Timeout-Fehler -> LLMError (fail-closed), nie Fehlertext als Draft."""
+    monkeypatch.setattr(
+        llm_briefing, "_get_client", lambda: _FakeClient(error=TimeoutError("request timed out"))
+    )
+    with pytest.raises(llm_briefing.LLMError, match="Revision fehlgeschlagen"):
+        llm_briefing.revise_draft(_facts_package(), "## Kurzlage\nAlt", [], mode="monday")
+
+
+def test_revise_draft_empty_response_raises_llm_error(monkeypatch):
+    """Leere LLM-Antwort -> LLMError, nie Leerstring/Fehlertext als Draft."""
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _FakeClient(content=None))
+    with pytest.raises(llm_briefing.LLMError, match="Empty response"):
+        llm_briefing.revise_draft(_facts_package(), "## Kurzlage\nAlt", [], mode="monday")
+
+
+def test_revise_draft_missing_api_key_raises_llm_error(monkeypatch):
+    """Fehlender API-Key -> LLMError mit API-Key-Hinweis (wie generate_draft)."""
+    monkeypatch.setattr(llm_briefing, "_load_env", lambda: None)
+    monkeypatch.setattr(llm_briefing.os, "getenv", lambda key, default=None: None)
+    with pytest.raises(llm_briefing.LLMError, match="API-Key"):
+        llm_briefing.revise_draft(_facts_package(), "## Kurzlage\nAlt", [])
+
+
+def test_revise_draft_passes_same_facts_instance(monkeypatch):
+    """revise_draft reicht die UNVERAENDERTE facts_package-Instanz an den
+    Prompt-Builder durch (Identitaet, keine Kopie — Plan §8.1)."""
+    received: dict = {}
+    real_loader = llm_briefing._load_revise_prompt
+
+    def _spy_loader(facts_package, draft, findings):
+        received["facts"] = facts_package
+        received["draft"] = draft
+        received["findings"] = findings
+        return real_loader(facts_package, draft, findings)
+
+    monkeypatch.setattr(llm_briefing, "_load_revise_prompt", _spy_loader)
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _FakeClient(content="## Kurzlage\nOK"))
+
+    facts = _facts_package()
+    findings = [
+        {"severity": "major", "issue": "x", "evidence": "y", "correction": "z"},
+        {"severity": "major", "issue": "a", "evidence": "b", "correction": "c"},
+    ]
+    llm_briefing.revise_draft(facts, "## Kurzlage\nAlt", findings, mode="monday")
+
+    assert received["facts"] is facts  # gleiche Instanz, keine Kopie
+    assert received["draft"] == "## Kurzlage\nAlt"
+    assert received["findings"] == findings
+
+
+def test_revise_draft_does_not_mutate_facts(monkeypatch):
+    """Nach dem Revisions-Aufruf ist das Faktenpaket unveraendert (keine
+    Analyse-/Faktenaenderung durch revise_draft)."""
+    import copy
+
+    facts = _facts_package()
+    original = copy.deepcopy(facts)
+    monkeypatch.setattr(llm_briefing, "_get_client", lambda: _FakeClient(content="## Kurzlage\nOK"))
+    llm_briefing.revise_draft(
+        facts,
+        "## Kurzlage\nAlt",
+        [{"severity": "critical", "issue": "x", "evidence": "y", "correction": "z"}],
+        mode="monday",
+    )
+    assert facts == original

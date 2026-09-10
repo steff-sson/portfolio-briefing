@@ -683,6 +683,59 @@ class TestNaechsterSchrittNoAction:
             for f in findings
         )
 
+    def test_acute_position_action_with_no_action_is_critical(self):
+        """Akute position_action (category 'akut') + no-action -> critical
+        (Phase B: akute Vorschlaege blocken weiterhin)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "reduzieren", "isin": "US0378331005", "name": "Apple Inc.", "category": "akut"}
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+        gate = verify.final_gate(findings)
+        assert gate.allow_send is False
+
+    def test_band_review_actions_do_not_block_no_action(self):
+        """Nur band_review-position_actions (Zielband/Untergewicht) + no-action
+        -> KEIN critical: Quartals-Review-Hinweise, kein akuter Handlungsbedarf."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "aufstocken", "isin": "NL0010273215", "name": "ASML", "category": "band_review"},
+            {"action": "reduzieren", "isin": "US0378331005", "name": "Apple Inc.", "category": "band_review"},
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert not any("Keine Aktion erforderlich" in f["issue"] for f in findings)
+
+    def test_band_review_actions_with_keine_akute_aktion_pass(self):
+        """Band/review-Actions + Quartals-Review-Formulierung ('keine akute
+        Aktion') -> verify gruen (blockt nicht faelschlich als Handlungsbedarf)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "aufstocken", "isin": "NL0010273215", "name": "ASML", "category": "band_review"},
+        ]
+        draft = VALID_DRAFT.replace(
+            "Nächste Woche neuer Lauf, keine Aktion erforderlich.",
+            "Keine akute Aktion — die Zielband-Abweichung wird im Quartals-Review behandelt.",
+        )
+        assert verify.verify_draft(facts, draft) == []
+
+    def test_mixed_band_review_and_acute_blocks_no_action(self):
+        """band_review OHNE akute Signale blockt nicht, aber sobald eine akute
+        position_action dazukommt -> critical (fail-closed fuer Widerspruch)."""
+        facts = copy.deepcopy(VALID_FACTS)
+        facts["deterministic_summary"]["position_actions"] = [
+            {"action": "aufstocken", "isin": "NL0010273215", "name": "ASML", "category": "band_review"},
+            {"action": "verkaufen", "isin": "US0378331005", "name": "Apple Inc.", "category": "akut"},
+        ]
+        findings = verify.verify_draft(facts, VALID_DRAFT)
+        assert any(
+            f["severity"] == "critical" and "Keine Aktion erforderlich" in f["issue"]
+            for f in findings
+        )
+
     def test_sell_signal_with_no_action_is_critical(self):
         """Nicht-excluded SELL-Signal (bestehender Satellit) + no-action -> critical."""
         facts = copy.deepcopy(VALID_FACTS)
@@ -1298,3 +1351,350 @@ class TestFinalGate:
         verification_before = copy.deepcopy(verification)
         verify.final_gate(verification)
         assert verification == verification_before
+
+
+# --- Phase 4b: additive positions_detail/sectors_detail-Werte + kompaktes
+# --- Briefing gegen das bestehende 6-Sektionen-Gate --------------------------
+#
+# facts.build_facts_package traegt seit Phase 4a die additiven Detail-Felder
+# deterministic_summary.positions_detail (Name/ISIN/Kategorie/Wert/Anteil/
+# Limit/Status) und sectors_detail (Satellite-Sektor-Zeilen). Das kompakte
+# Briefing (config/prompts/briefing.txt, INHALT DER SEKTIONEN) referenziert
+# diese Werte 1:1. verify_draft muss sie akzeptieren (Zahlen-Allowlist liest
+# direkt aus dem deterministic_summary) — erfundene Zahlen/Limits bleiben
+# critical (fail-closed unveraendert). Core-ETFs/Legacy (SUSE) duerfen nie
+# als Satellite-REDUCE-Signal erscheinen (deterministisch ausgeschlossen).
+#
+# Integration statt Einheitstest: das Faktenpaket wird wie in der Pipeline
+# ueber facts.build_facts_package gebaut (kein Hand-Dict), damit die
+# Detail-Felder exakt so entstehen wie im Live-Betrieb.
+
+_COMPACT_STRATEGY = {
+    "portfolio": {
+        "core_pct": 70.0,
+        "satellite_pct": 30.0,
+        "rebalancing": {"threshold_pct": 5.0},
+    },
+    "satellite_limits": {
+        "target_position_pct": 5.0,
+        "max_position_pct": 10.0,
+        "max_sector_pct": 20.0,
+        "max_turnover_annual_pct": 30.0,
+    },
+}
+
+
+def _compact_analysis(positions: list, total: float, sectors: dict, max_sector: str) -> dict:
+    """Analyse-Befunde: nur ``category=="satellite"``-Positionen fliessen in
+    Sektor-/Einzelpositions-Checks ein (Core/unknown nicht, analyze Phase 4a)."""
+    return {
+        "generated_at": "2026-08-28T09:00:00+02:00",
+        "overall_status": "red",
+        "checks": {
+            "positions": {"total_value_eur": total, "positions": positions},
+            "core_satellite": {"core_ratio": 0.5455, "status": "yellow"},
+            "sector_concentration": {
+                "sector_ratios": sectors,
+                "max_sector": max_sector,
+                "max_ratio": sectors.get(max_sector, 0.0),
+                "status": "red",
+            },
+            "single_position": {"max_position": {"name": "Novo Nordisk", "weight": 0.1818}, "status": "red"},
+            "drift": {"drift": 0.0, "status": "green"},
+            "turnover": {"turnover_ratio": 0.0, "status": "green"},
+            "thesis_deadlines": {"outdated": [], "status": "green"},
+        },
+    }
+
+
+def _build_compact_package(portfolio: dict, analysis: dict) -> dict:
+    from scripts import facts
+
+    return facts.build_facts_package(
+        portfolio, [], analysis, news=[], strategy=_COMPACT_STRATEGY, mode="monday"
+    )
+
+
+# Szenario A: Core (54.5%) + 3 Satellites in zwei Sektoren (Technology 60%,
+# Health 40% der Satellite-Summe) — alle drei Satellites ueber dem
+# Einzelpositionslimit von 10.0% -> position_actions mit 3 REDUCE-Kandidaten.
+_COMPACT_PORTFOLIO_A = {
+    "total_value_eur": 11000.0,
+    "holdings": [
+        {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0},
+        {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 1800.0, "sector": "Technology"},
+        {"isin": "NL0010273215", "name": "ASML", "category": "satellite", "value_eur": 1200.0, "sector": "Technology"},
+        {"isin": "DK0062498333", "name": "Novo Nordisk", "category": "satellite", "value_eur": 2000.0, "sector": "Health"},
+    ],
+}
+
+_COMPACT_ANALYSIS_A = _compact_analysis(
+    [
+        {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0, "weight": 0.5455},
+        {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 1800.0, "weight": 0.1636, "sector": "Technology"},
+        {"isin": "NL0010273215", "name": "ASML", "category": "satellite", "value_eur": 1200.0, "weight": 0.1091, "sector": "Technology"},
+        {"isin": "DK0062498333", "name": "Novo Nordisk", "category": "satellite", "value_eur": 2000.0, "weight": 0.1818, "sector": "Health"},
+    ],
+    11000.0,
+    {"Technology": 0.6, "Health": 0.4},
+    "Technology",
+)
+
+_COMPACT_DRAFT_A = (
+    "## Kurzlage\n"
+    "Sektor-Konzentration: Technology 60.0%, Health 40.0% der Satellites — "
+    "über dem Satellite-Sektorlimit von 20.0%. Novo Nordisk (DK0062498333) "
+    "bei 18.2%, NVIDIA (US67066G1040) bei 16.4%, ASML (NL0010273215) bei "
+    "10.9% — alle über dem Einzelpositionslimit von 10.0%.\n\n"
+    "## Datenqualität\n"
+    "Datenqualität: ok.\n\n"
+    "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+    "Novo Nordisk (DK0062498333), NVIDIA (US67066G1040) und ASML "
+    "(NL0010273215) REDUCE wegen Einzelpositionslimit.\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar\n\n"
+    "## Watchlist-Signale\n"
+    "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar\n\n"
+    "## Empfehlung\n"
+    "SELL — Satellite-Limits verletzt.\n\n"
+    "## Nächster Schritt\n"
+    "Novo Nordisk, NVIDIA und ASML gemäß Positionsvorschlag reduzieren."
+)
+
+
+# Szenario B: Core-ETF ist die groesste Position (66.7%, kein Grenzverstoß),
+# NVIDIA (33.3%) Satellite ueber Limit, SUSE unbewertet (Legacy) — SUSE-ISIN
+# weder in position_actions noch in satellite_sell_signals (deterministisch).
+_COMPACT_PORTFOLIO_B = {
+    "total_value_eur": 10000.0,
+    "holdings": [
+        {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0},
+        {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 3000.0, "sector": "Technology"},
+        {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": None},
+    ],
+}
+
+_COMPACT_ANALYSIS_B = _compact_analysis(
+    [
+        {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI", "category": "core", "value_eur": 6000.0, "weight": 0.6667},
+        {"isin": "US67066G1040", "name": "NVIDIA", "category": "satellite", "value_eur": 3000.0, "weight": 0.3333, "sector": "Technology"},
+        {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": 0.0, "weight": 0.0},
+    ],
+    9000.0,
+    {"Technology": 1.0},
+    "Technology",
+)
+
+_COMPACT_DRAFT_B_BODY = (
+    "## Kurzlage\n"
+    "Beobachten, nicht sofort handeln. Der Core-ETF iShares Core MSCI EM IMI "
+    "(IE00BKM4GZ66) ist mit 66.7% die größte Position — das ist Core, kein "
+    "Grenzverstoß. Der Technology-Sektor liegt mit 100.0% über dem "
+    "Satellite-Sektorlimit von 20.0%. NVIDIA (US67066G1040) ist mit 33.3% "
+    "über dem Einzelpositionslimit von 10.0%. SUSE (LU2722255754, Legacy) ist "
+    "unbewertet. Gesamtwert: 9000 €.\n\n"
+    "## Datenqualität\n"
+    "SUSE (LU2722255754) ist unbewertet. Der Gesamtwert ist die Summe der "
+    "bewerteten Positionen.\n\n"
+    "## Sell-/Reduce-Signale (bestehende Satellites)\n"
+    "NVIDIA (US67066G1040) REDUCE wegen Einzelpositionslimit.\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar\n\n"
+    "## Watchlist-Signale\n"
+    "Keine Watchlist-Signale (NO SIGNAL für alle Positionen).\n"
+    "Fundamentaldaten (Umsatz, Gewinn, Cashflow, Verschuldung, Bewertung) nicht automatisch verfügbar\n\n"
+    "## Empfehlung\n"
+    "{label} — 4 von 7 Kategorien grün.\n\n"
+    "## Nächster Schritt\n"
+    "NVIDIA (US67066G1040) gemäß Positionsvorschlag reduzieren; SUSE-"
+    "Datenqualität vorab klären."
+)
+
+
+def _compact_draft_b(pkg: dict) -> str:
+    """Draft B mit dem deterministischen Empfehlungs-Label des Pakets
+    (1:1-Pflicht, Label wird nie im Test hartkodiert)."""
+    rec = pkg.get("deterministic_summary", {}).get("recommendation", {})
+    label = rec.get("label") if isinstance(rec, dict) and rec.get("label") in ("BUY", "SELL", "WATCH") else "WATCH"
+    return _COMPACT_DRAFT_B_BODY.format(label=label)
+
+
+class TestCompactBriefingDetails:
+    """Phase 4b: die additiven positions_detail/sectors_detail-Werte (Anteil,
+    Satellite-Limit, Sektor-Ratio) und das kompakte Briefing bestehen das
+    bestehende 6-Sektionen-Gate; erfundene Zahlen/Limits bleiben critical."""
+
+    def _package_a(self) -> dict:
+        return _build_compact_package(_COMPACT_PORTFOLIO_A, _COMPACT_ANALYSIS_A)
+
+    def _package_b(self) -> dict:
+        return _build_compact_package(_COMPACT_PORTFOLIO_B, _COMPACT_ANALYSIS_B)
+
+    def test_sectors_detail_ratios_in_allowlist(self):
+        """Alle Sektor-Ratios aus sectors_detail (auch Nicht-Max-Sektoren wie
+        Health 40.0%) sind deterministische Paket-Fakten — kein Zahlen-Finding."""
+        pkg = self._package_a()
+        ratios = [s["ratio"] for s in pkg["deterministic_summary"]["sectors_detail"]]
+        assert ratios == [0.6, 0.4]
+        allowed = verify._sectors_detail_pct(pkg)
+        assert round(0.6 * 100, 1) in allowed and round(0.4 * 100, 1) in allowed
+        findings = verify.verify_draft(pkg, _COMPACT_DRAFT_A)
+        assert not any("passt nicht 1:1" in f["issue"] for f in findings)
+
+    def test_positions_detail_weight_and_limit_in_allowlist(self):
+        """positions_detail: Anteil (weight -> %) und Satellite-Limit
+        (limit_pct) sind deterministische Paket-Fakten (Zahlen-Allowlist)."""
+        pkg = self._package_b()
+        allowed = verify._positions_detail_pct(pkg)
+        assert round(0.6667 * 100, 1) in allowed  # Core-Anteil 66.7%
+        assert round(0.3333 * 100, 1) in allowed  # NVIDIA-Anteil 33.3%
+        assert 10.0 in allowed  # Satellite-Limit max_position_pct
+        assert verify.verify_draft(pkg, _compact_draft_b(pkg)) == []
+
+    def test_compact_briefing_a_passes_full_gate(self):
+        """Szenario A (2 Satellite-Sektoren, 3 REDUCE-Kandidaten): das kompakte
+        Briefing besteht verify_draft UND final_gate ohne blockierende
+        Findings (alle 6 Sektionen, Zahlen 1:1, Empfehlungs-Label 1:1)."""
+        pkg = self._package_a()
+        assert verify.verify_draft(pkg, _COMPACT_DRAFT_A) == []
+        assert verify.final_gate(verify.verify_draft(pkg, _COMPACT_DRAFT_A)).allow_send is True
+
+    def test_hallucinated_detail_values_stay_critical(self):
+        """Fail-closed unveraendert: ein Sektor-Anteil (45.0%) oder ein Limit
+        (12.0%), die in keinem positions_detail/sectors_detail stehen, bleiben
+        critical — die Detail-Allowlist oeffnet keine neuen Zahlen."""
+        pkg = self._package_a()
+        for bad in ("Health liegt bei 45.0% der Satellites.",
+                    "Das Einzelpositionslimit liegt bei 12.0%."):
+            draft = _COMPACT_DRAFT_A.replace(
+                "Novo Nordisk (DK0062498333) bei 18.2%", f"{bad} Novo Nordisk (DK0062498333) bei 18.2%"
+            )
+            findings = verify.verify_draft(pkg, draft)
+            assert any(
+                f["severity"] == "critical" and "passt nicht 1:1" in f["issue"]
+                for f in findings
+            ), bad
+
+    def test_hallucinated_detail_number_without_detail_fields_stays_critical(self):
+        """Ohne positions_detail/sectors_detail im Paket bleibt ein Nicht-Max-
+        Sektor-Anteil critical (Allowlist bleibt leer, fail-closed)."""
+        pkg = self._package_a()
+        summary = pkg["deterministic_summary"]
+        del summary["positions_detail"]
+        del summary["sectors_detail"]
+        findings = verify.verify_draft(pkg, _COMPACT_DRAFT_A)
+        assert any(f["severity"] == "critical" and "40.0" in f["issue"] for f in findings)
+
+    def test_core_etf_and_legacy_never_satellite_reduce_signals(self):
+        """Deterministische Kategorie-Trennung (Phase 4a) auf Paket-Ebene:
+        Core-ETF (groesste Position) und SUSE (Legacy, unbewertet) sind weder
+        in satellite_sell_signals noch in position_actions — nur der echte
+        Satellite (NVIDIA) ist REDUCE-Kandidat. Der kompakte Draft, der den
+        Core-ETF als Core (kein Grenzverstoß) und SUSE als unbewertete
+        Legacy-Position beschreibt, passiert das Gate."""
+        pkg = self._package_b()
+        summary = pkg["deterministic_summary"]
+        action_isins = {a["isin"] for a in summary.get("position_actions", []) if isinstance(a, dict)}
+        sell_isins = {s["isin"] for s in summary.get("satellite_sell_signals", []) if isinstance(s, dict)}
+        assert "US67066G1040" in action_isins  # Satellite ueber Limit -> REDUCE bleibt pruefbar
+        assert "IE00BKM4GZ66" not in action_isins and "IE00BKM4GZ66" not in sell_isins
+        assert "LU2722255754" not in action_isins and "LU2722255754" not in sell_isins
+        assert verify.verify_draft(pkg, _compact_draft_b(pkg)) == []
+
+    def test_positions_detail_pct_fault_tolerant(self):
+        """_positions_detail_pct: fehlende/ungueltige Eintraege -> leere Liste
+        bzw. nur numerische weight/limit_pct-Werte."""
+        assert verify._positions_detail_pct({}) == []
+        assert verify._positions_detail_pct({"deterministic_summary": {}}) == []
+        assert verify._positions_detail_pct({"deterministic_summary": {"positions_detail": "x"}}) == []
+        pkg = {
+            "deterministic_summary": {
+                "positions_detail": [
+                    {"weight": 0.6667, "limit_pct": 10.0},
+                    {"weight": None, "limit_pct": None},
+                    {"weight": 0, "limit_pct": 0},
+                    "invalid",
+                ]
+            }
+        }
+        allowed = verify._positions_detail_pct(pkg)
+        assert round(0.6667 * 100, 1) in allowed and 10.0 in allowed
+        assert len(allowed) == 2
+
+    def test_sectors_detail_pct_fault_tolerant(self):
+        """_sectors_detail_pct: fehlende/ungueltige Eintraege -> leere Liste
+        bzw. nur numerische ratio/limit_pct-Werte."""
+        assert verify._sectors_detail_pct({}) == []
+        assert verify._sectors_detail_pct({"deterministic_summary": {"sectors_detail": []}}) == []
+        pkg = {
+            "deterministic_summary": {
+                "sectors_detail": [
+                    {"ratio": 0.6, "limit_pct": 20.0},
+                    {"ratio": 0.0, "limit_pct": None},
+                    {"ratio": True},
+                ]
+            }
+        }
+        allowed = verify._sectors_detail_pct(pkg)
+        assert 60.0 in allowed and 20.0 in allowed
+        assert len(allowed) == 2
+
+
+# --- Phase A: gemeinsame autoritative Allowlist-Factory -----------------------
+# verify.build_allowed_numbers ist die gemeinsame Quelle fuer verify_draft
+# (Gate) und llm_briefing._zulaessige_zahlen_block (Prompt). Sie vereinigt
+# alle 7 Allowlist-Quellen — eine Divergenz zwischen Prompt und Gate ist
+# ausgeschlossen. Fail-closed-Verhalten bleibt unveraendert.
+
+
+class TestBuildAllowedNumbers:
+    """Phase A: build_allowed_numbers == Summe aller 7 Quellen-Helfer; die
+    Factory enthaelt positions_detail/sectors_detail als fertige Prozentwerte
+    und bleibt bei leerem/ungueltigem Paket fail-closed (leere Liste)."""
+
+    def _package_a_with_scores(self) -> dict:
+        pkg = _build_compact_package(_COMPACT_PORTFOLIO_A, _COMPACT_ANALYSIS_A)
+        pkg["deterministic_summary"]["watchlist_signals"] = [
+            {"isin": "US67066G1040", "name": "NVIDIA", "signal": "BUY", "score": 2},
+            {"isin": "DK0062498333", "name": "Novo Nordisk", "signal": "NO SIGNAL", "score": -1},
+        ]
+        return pkg
+
+    def test_factory_unites_all_seven_sources(self):
+        """Factory == Vereinigung aller 7 Quellen-Helfer (keine ausgelassene
+        Quelle, keine zusaetzliche Logik)."""
+        pkg = self._package_a_with_scores()
+        summary = pkg["deterministic_summary"]
+        expected = set(
+            verify._summary_numbers_pct(summary)
+            + verify._strategy_thresholds_pct(pkg["strategy_thresholds_pct"])
+            + verify._holdings_weights_pct(pkg)
+            + verify._etf_ters_pct(pkg)
+            + verify._positions_detail_pct(pkg)
+            + verify._sectors_detail_pct(pkg)
+            + verify._summary_watchlist_scores(summary)
+        )
+        assert verify.build_allowed_numbers(pkg) == sorted(expected)
+        # Watchlist-Scores (Phase 5) sind Teil der gemeinsamen Allowlist.
+        assert 2.0 in expected and -1.0 in expected
+
+    def test_factory_contains_detail_values_as_percent(self):
+        """positions_detail/sectors_detail erscheinen als fertige Prozentwerte
+        (weight-Ratio 0.6667 -> 66.7, Sektor-Ratio 1.0 -> 100.0, Limits 1:1) —
+        das Gate prueft genau diese Werte, kein Ratio->%-Umrechnen noetig."""
+        pkg = _build_compact_package(_COMPACT_PORTFOLIO_B, _COMPACT_ANALYSIS_B)
+        allowed = verify.build_allowed_numbers(pkg)
+        assert 66.7 in allowed  # Core-Anteil aus positions_detail[].weight 0.6667
+        assert 33.3 in allowed  # NVIDIA-Anteil aus positions_detail[].weight 0.3333
+        assert 10.0 in allowed  # Satellite-Limit max_position_pct (limit_pct)
+        assert 100.0 in allowed  # Technology-Ratio 1.0 aus sectors_detail
+        assert 20.0 in allowed  # Satellite-Sektorlimit max_sector_pct (limit_pct)
+
+    def test_factory_empty_package_fail_closed(self):
+        """Leeres/ungueltiges Paket -> leere Allowlist (fail-closed: nichts
+        wird zusaetzlich toleriert, Halluzinationen bleiben blockierend)."""
+        assert verify.build_allowed_numbers({}) == []
+        assert verify.build_allowed_numbers({"deterministic_summary": {}}) == []
+        assert verify.build_allowed_numbers(
+            {"deterministic_summary": {"positions_detail": "x"}, "portfolio": {}, "strategy_thresholds_pct": None}
+        ) == []
+

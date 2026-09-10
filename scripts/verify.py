@@ -181,16 +181,32 @@ def _non_excluded_action_signals(facts_package: dict, labels: tuple) -> list:
     return result
 
 
+def _akute_position_actions(facts_package: dict) -> list:
+    """position_actions mit akutem Handlungsbedarf (nicht band_review).
+
+    Fail-closed: nur explizit als ``category == "band_review"`` markierte
+    Vorschlaege (Zielband-/Untergewicht-Hinweise) sind reine Quartals-Review
+    ohne akute Handlung. Objekte ohne category (Alt-Daten/Mocks) und
+    malformed Eintraege zaehlen als akut — sie blocken die no-action-Phrase.
+    """
+    return [
+        a
+        for a in _position_actions(facts_package)
+        if not (isinstance(a, dict) and a.get("category") == "band_review")
+    ]
+
+
 def _naechster_schritt_handlungsbedarf(facts_package: dict) -> bool:
-    """Konkrete Handlungssignale fuer die no-action-Regel (Phase 5)?
+    """Konkrete AKUTE Handlungssignale fuer die no-action-Regel (Phase 5)?
 
     Deckt sich 1:1 mit dem Renderer-Contract
-    (_section_naechster_schritt): SELL/REDUCE auf bestehenden Satellites,
-    BUY auf der Watchlist oder nicht-leere position_actions. Nur diese
-    Signale erzeugen konkreten Handlungstext — rote/gelbe Checks allein
-    sind keine Handlungsempfehlung und blocken die no-action-Phrase nicht.
+    (_section_naechster_schritt): akute position_actions (category "akut"),
+    SELL/REDUCE auf bestehenden Satellites, BUY auf der Watchlist. Nur diese
+    Signale erzeugen akuten Handlungstext — rote/gelbe Checks allein und
+    band_review-Vorschlaege (Zielband-/Untergewicht-Hinweise) sind keine
+    akute Handlungsempfehlung und blocken die no-action-Phrase nicht.
     """
-    if _position_actions(facts_package):
+    if _akute_position_actions(facts_package):
         return True
     if _non_excluded_action_signals(facts_package, ("SELL", "REDUCE", "BUY")):
         return True
@@ -641,6 +657,65 @@ def _holdings_weights_pct(facts_package: dict) -> list[float]:
     return weights
 
 
+def _positions_detail_pct(facts_package: dict) -> list[float]:
+    """Prozentwerte aus deterministic_summary.positions_detail (Phase 4b).
+
+    Deterministische Paket-Fakten (additiv zu _holdings_weights_pct): die
+    Detail-Zeilen tragen je Position ``weight`` (Ratio) und ``limit_pct``
+    (Prozent, nur Satellite) — das LLM sieht genau diese Zeilen im Prompt
+    und darf die Werte 1:1 referenzieren (kompakte Kurzlage). Der Anteil
+    einer Position folgt aus dem analyze-Gewicht (nie neu berechnet) und
+    kann von der Holdings-Neuberechnung abweichen — die Allowlist liest
+    daher direkt aus dem deterministic_summary (autoritative Quelle), nie
+    aus den Holdings. None/0-Werte werden ignoriert; fehlende Daten ergeben
+    eine leere Liste (fail-closed).
+    """
+    summary = facts_package.get("deterministic_summary", {})
+    detail = summary.get("positions_detail", []) if isinstance(summary, dict) else []
+    if not isinstance(detail, list):
+        return []
+    values: list[float] = []
+    for entry in detail:
+        if not isinstance(entry, dict):
+            continue
+        weight = entry.get("weight")
+        if isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0:
+            values.append(round(float(weight) * 100, 1))
+        limit = entry.get("limit_pct")
+        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+            values.append(round(float(limit), 1))
+    return values
+
+
+def _sectors_detail_pct(facts_package: dict) -> list[float]:
+    """Prozentwerte aus deterministic_summary.sectors_detail (Phase 4b).
+
+    Deterministische Paket-Fakten: die Detail-Zeilen tragen je
+    Satellite-Sektor ``ratio`` (Anteil an der Satellite-Summe, Ratio) und
+    ``limit_pct`` (max_sector_pct, Prozent). Das LLM sieht diese Zeilen im
+    Prompt und darf sie 1:1 referenzieren. Anders als max_sector_ratio
+    (nur der groesste Sektor) sind ALLE Sektor-Ratios legitime Paket-Fakten
+    — die Allowlist liest direkt aus dem deterministic_summary.
+    None/0-Werte werden ignoriert; fehlende Daten ergeben eine leere Liste
+    (fail-closed).
+    """
+    summary = facts_package.get("deterministic_summary", {})
+    detail = summary.get("sectors_detail", []) if isinstance(summary, dict) else []
+    if not isinstance(detail, list):
+        return []
+    values: list[float] = []
+    for entry in detail:
+        if not isinstance(entry, dict):
+            continue
+        ratio = entry.get("ratio")
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and ratio > 0:
+            values.append(round(float(ratio) * 100, 1))
+        limit = entry.get("limit_pct")
+        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+            values.append(round(float(limit), 1))
+    return values
+
+
 def _etf_ters_pct(facts_package: dict) -> list[float]:
     """TER-Werte der Portfolio-ETFs aus config/etf_lookup.json (in Prozent).
 
@@ -677,6 +752,34 @@ def _etf_ters_pct(facts_package: dict) -> list[float]:
         if isinstance(ter, (int, float)) and ter > 0:
             values.append(round(float(ter), 2))
     return values
+
+
+def build_allowed_numbers(facts_package: dict) -> list[float]:
+    """Autoritative Zahlen-Allowlist — gemeinsame Quelle fuer Prompt und Gate.
+
+    Vereinigt alle deterministischen Prozent-/Score-Werte des Faktenpakets
+    (Phase A, Plan §4.2): summary-Prozente, Strategie-Grenzwerte,
+    Holdings-Gewichte, ETF-TERs, positions_detail-Anteile/-Limits
+    (weight-Ratio -> %), sectors_detail-Ratios/-Limits und
+    Watchlist-Scores. Beide Verbraucher — ``verify.verify_draft`` und
+    ``llm_briefing._zulaessige_zahlen_block`` — nutzen exakt diese Funktion;
+    eine Divergenz zwischen Prompt-Allowlist und Gate-Allowlist ist damit
+    ausgeschlossen. Fail-closed unveraendert: fehlende/ungueltige
+    Paket-Daten ergeben eine leere Liste (keine neuen tolerierten Werte).
+    """
+    summary = facts_package.get("deterministic_summary", {})
+    thresholds = facts_package.get("strategy_thresholds_pct", {})
+    return sorted(
+        set(
+            _summary_numbers_pct(summary)
+            + _strategy_thresholds_pct(thresholds)
+            + _holdings_weights_pct(facts_package)
+            + _etf_ters_pct(facts_package)
+            + _positions_detail_pct(facts_package)
+            + _sectors_detail_pct(facts_package)
+            + _summary_watchlist_scores(summary)
+        )
+    )
 
 
 def _raw_check_name_violations(text: str) -> list[str]:
@@ -1003,11 +1106,13 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
 
     # 2a. Naechster-Schritt-Konformitaet (Phase 5): "Keine Aktion erforderlich"
     #     in der "## Naechster Schritt"-Sektion blockt als critical, wenn das
-    #     Faktenpaket KONKRETE Handlungssignale ausweist (deterministischer
+    #     Faktenpaket KONKRETE AKUTE Handlungssignale ausweist (deterministischer
     #     Renderer-Contract _section_naechster_schritt):
     #     - nicht-excluded SELL/REDUCE in satellite_sell_signals,
     #     - BUY in watchlist_signals,
-    #     - nicht-leere position_actions.
+    #     - akute position_actions (category "akut"; band_review-Vorschlaege
+    #       sind Quartals-Review-Hinweise und blocken die Phrase nicht —
+    #       sie sind als Quartals-Review formulierbar).
     #     Rote/gelbe Checks ALLEIN sind KEINE konkrete Handlungsempfehlung —
     #     sie blocken die no-action-Phrase nicht (nur die Kurzlage-
     #     Konformitaetsphrase in Schritt 2 reagiert auf rote/gelbe Checks).
@@ -1023,7 +1128,8 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
             _finding(
                 "critical",
                 "'Keine Aktion erforderlich' trotz Handlungsbedarf",
-                f"position_actions={len(_position_actions(facts_package))}, "
+                f"position_actions={len(_position_actions(facts_package))} "
+                f"(akut={len(_akute_position_actions(facts_package))}), "
                 f"sell_signals={_non_excluded_action_signals(facts_package, ('SELL', 'REDUCE'))}, "
                 f"buy_signals={_non_excluded_action_signals(facts_package, ('BUY',))}",
                 "Nächster Schritt konkret adressieren (SELL/REDUCE/BUY/Vorschlag)",
@@ -1058,11 +1164,10 @@ def verify_draft(facts_package: dict, draft: str) -> list[dict]:
     #    ZULÄSSIGE-ZAHLEN-Liste im Draft-Prompt. Eine fruehere ±0.5pp-Toleranz
     #    liess abweichende Werte durch; abweichende Zahlen blocken jetzt
     #    critical, egal wie nah sie an einem erlaubten Wert liegen).
-    thresholds = facts_package.get("strategy_thresholds_pct", {})
-    allowed = _summary_numbers_pct(summary) + _strategy_thresholds_pct(thresholds)
-    allowed += _holdings_weights_pct(facts_package)  # Holdings-Gewichte sind deterministische Paket-Fakten
-    allowed += _summary_watchlist_scores(summary)  # Phase 5: Signal-Score-Ganzzahlen
-    allowed += _etf_ters_pct(facts_package)  # ETF-TERs aus etf_lookup.json (statische Konfig-Fakten)
+    #    Phase A: die Allowlist kommt aus der gemeinsamen Factory
+    #    build_allowed_numbers (identische Quelle wie der Draft-Prompt —
+    #    keine zweite, abweichende Inline-Liste im Gate).
+    allowed = build_allowed_numbers(facts_package)
     allowed_formatted = sorted({f"{value:.1f}" for value in allowed})
     allowed_exact_2 = sorted({f"{value:.2f}" for value in allowed if value < 1.0})
     for num in _extract_numbers(text):
