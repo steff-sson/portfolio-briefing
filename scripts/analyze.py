@@ -634,13 +634,18 @@ def calculate_core_satellite(positions: list, strategy: dict) -> dict:
 def calculate_sector_concentration(positions: list, strategy: dict) -> dict:
     """Sektor-Konzentration gegen satellite_limits.max_sector_pct (15.0 = 15%).
 
-    Sektor-Klassifikation: explizites ``sector``-Feld der Holding, sonst
-    Fallback ueber config/etf_lookup.json (ISIN -> sector), sonst "Unknown".
+    Nur explizite ``category=="satellite"``-Positionen fliessen in die
+    Sektor-Summe ein (Plan: Core-ETFs sind bewusst breit gestreut — ihr
+    Sektor ist nicht "konzentriert"; Legacy/unknown werden nicht als
+    Satellite gewertet). Sektor-Klassifikation: explizites ``sector``-Feld
+    der Holding, sonst Fallback ueber config/etf_lookup.json (ISIN -> sector),
+    sonst "Unknown". Ohne Satellite-Positionen ist der Check green.
     """
     etf_lookup = load_etf_lookup()
-    total = sum(p["value_eur"] for p in positions)
+    satellite_positions = [p for p in positions if _holding_category(p, strategy) == "satellite"]
+    total = sum(p["value_eur"] for p in satellite_positions)
     sector_values: dict[str, float] = {}
-    for p in positions:
+    for p in satellite_positions:
         sector = p.get("sector") or etf_lookup.get(p.get("isin"), {}).get("sector") or "Unknown"
         sector_values[sector] = sector_values.get(sector, 0) + p["value_eur"]
     sector_ratios = {s: round(v / total, 4) if total else 0 for s, v in sector_values.items()}
@@ -657,9 +662,17 @@ def calculate_sector_concentration(positions: list, strategy: dict) -> dict:
 
 
 def calculate_single_position_max(positions: list, strategy: dict) -> dict:
-    """Einzelposition-Limit gegen satellite_limits.max_position_pct (5.0 = 5%)."""
+    """Einzelposition-Limit gegen satellite_limits.max_position_pct (5.0 = 5%).
+
+    Nur explizite ``category=="satellite"``-Positionen werden gegen das
+    Satellite-Einzelpositionslimit geprueft (Plan: Core-ETFs bei 20-40%
+    Gewicht sind keine "Einzelposition ueber Limit" — das Limit gilt fuer
+    Satellites). Core-/Legacy-/unknown-Positionen sind ausgeschlossen.
+    Ohne Satellite-Positionen ist der Check green (keine Verletzung).
+    """
     threshold = _pct(_satellite_limits(strategy).get("max_position_pct"))
-    max_pos = max(positions, key=lambda p: p["weight"]) if positions else None
+    satellite_positions = [p for p in positions if _holding_category(p, strategy) == "satellite"]
+    max_pos = max(satellite_positions, key=lambda p: p["weight"]) if satellite_positions else None
     status = "green"
     if max_pos and max_pos["weight"] > threshold:
         status = "red"
@@ -1018,6 +1031,19 @@ _ACTION_PRIORITY = {
     "turnover_red": 5,
     "single_position_yellow": 6,
     "underweight": 7,
+}
+
+# Semantische Kategorie pro Aktionstyp (Phase B): "akut" = konkrete Handlung
+# jetzt/zeitnah (Signal-basiert); "band_review" = Zielband-Abweichung/
+# Untergewicht, reiner Quartals-Review-Hinweis ohne akuten Handlungsdruck.
+_ACTION_CATEGORIES = {
+    "single_position_red": "akut",
+    "sector_red": "akut",
+    "thesis_red": "akut",
+    "perf_negative": "akut",
+    "turnover_red": "akut",
+    "single_position_yellow": "band_review",
+    "underweight": "band_review",
 }
 
 # Deterministische, nummernfreie Gegenargumente/Risiken pro Aktionstyp
@@ -1673,14 +1699,32 @@ def build_traffic_lights(analysis: dict, strategy: dict, data_quality: dict | No
         }
 
     # 3. Einzelposition
+    #    Nur Satellite-Positionen (Plan: Core-ETFs bei 20-40% Gewicht sind
+    #    keine "Einzelposition ueber Limit" — das Limit gilt fuer Satellites).
+    #    Ohne Satellite-Positionen ist die Ampel green (keine Verletzung).
     sp_check = checks.get("single_position", {})
     max_position = sp_check.get("max_position")
     max_position_weight = _as_percent(max_position.get("weight")) if isinstance(max_position, dict) else None
     max_position_name = _str_or(max_position.get("name")) if isinstance(max_position, dict) else ""
-    if max_position_weight is None or not max_pos:
+    satellite_count = sum(
+        1
+        for p in checks.get("positions", {}).get("positions", [])
+        if isinstance(p, dict) and p.get("category") == "satellite"
+    )
+    if not max_pos:
         lights["single_position"] = {
             "status": "red",
-            "reason": "Einzelpositions-Limit nicht bestimmbar (Grenzwert oder Position fehlt).",
+            "reason": "Einzelpositions-Limit nicht bestimmbar (Grenzwert fehlt).",
+        }
+    elif satellite_count == 0:
+        lights["single_position"] = {
+            "status": "green",
+            "reason": "Keine Satellite-Position über dem Limit.",
+        }
+    elif max_position_weight is None:
+        lights["single_position"] = {
+            "status": "red",
+            "reason": "Einzelpositions-Limit nicht bestimmbar (Position fehlt).",
         }
     elif max_position_weight > max_pos:
         lights["single_position"] = {
@@ -1838,6 +1882,13 @@ def build_position_actions(
     Positionsgewichte gehoeren nicht zur verify-Allowlist (Zahlen nur 1:1
     aus deterministic_summary, verify.verify_draft blockt Abweichungen).
 
+    Jeder Vorschlag traegt zudem ``category`` (``_ACTION_CATEGORIES``):
+    "akut" fuer echte Signal-basierte Handlungen (Prioritaeten 1-5),
+    "band_review" fuer reine Zielband-/Untergewicht-Hinweise (Prioritaeten
+    6-7). Verify wertet nur "akut" als akuten Handlungsbedarf — die
+    Band-/Review-Hinweise sind Quartals-Review und blocken die
+    no-action-Phrase nicht.
+
     ``analysis`` (optional): liefert die strukturierten thesis_deadlines/
     outdated-Daten (file + created) fuer die deterministische Zuordnung
     abgelaufener Thesen zu Positionen (ISIN/Ticker/Dateinamen-Matching).
@@ -1852,10 +1903,12 @@ def build_position_actions(
     candidates: list[dict] = []
 
     # 1. Rote Ampel Einzelposition -> Reduzierung der betreffenden ISIN.
+    #    Nur Satellite-Positionen (Core-ETFs/Legacy/unknown erzeugen keine
+    #    REDUCE gegen das Satellite-Einzelpositionslimit).
     sp_light = traffic_lights.get("single_position", {})
     if sp_light.get("status") == "red":
         for p in positions:
-            if p.get("weight", 0) > max_pos:
+            if p.get("category") == "satellite" and p.get("weight", 0) > max_pos:
                 candidates.append({
                     "action": "reduzieren",
                     "isin": p.get("isin", ""),
@@ -1863,6 +1916,7 @@ def build_position_actions(
                     "reason": "Einzelposition über dem Maximum.",
                     "gegenargument": _ACTION_COUNTER_ARGUMENTS["reduzieren"],
                     "priority": _ACTION_PRIORITY["single_position_red"],
+                    "category": _ACTION_CATEGORIES["single_position_red"],
                     "deviation": p.get("weight", 0) - max_pos,
                 })
 
@@ -1878,6 +1932,7 @@ def build_position_actions(
                 "reason": "Position im übergewichteten Sektor.",
                 "gegenargument": _ACTION_COUNTER_ARGUMENTS["reduzieren"],
                 "priority": _ACTION_PRIORITY["sector_red"],
+                "category": _ACTION_CATEGORIES["sector_red"],
                 "deviation": _weight - max_sector,
             })
 
@@ -1909,6 +1964,7 @@ def build_position_actions(
                 "reason": "Abgelaufene Thesis.",
                 "gegenargument": _ACTION_COUNTER_ARGUMENTS["verkaufen"],
                 "priority": _ACTION_PRIORITY["thesis_red"],
+                "category": _ACTION_CATEGORIES["thesis_red"],
                 "deviation": 0.0,
             })
 
@@ -1923,6 +1979,7 @@ def build_position_actions(
                 "reason": "6-Monats-Performance negativ.",
                 "gegenargument": _ACTION_COUNTER_ARGUMENTS["reduzieren"],
                 "priority": _ACTION_PRIORITY["perf_negative"],
+                "category": _ACTION_CATEGORIES["perf_negative"],
                 "deviation": abs(perf),
             })
 
@@ -1938,13 +1995,16 @@ def build_position_actions(
                 "reason": "Stärkster Beitrag zum überhöhten Umschlag.",
                 "gegenargument": _ACTION_COUNTER_ARGUMENTS["reduzieren"],
                 "priority": _ACTION_PRIORITY["turnover_red"],
+                "category": _ACTION_CATEGORIES["turnover_red"],
                 "deviation": 0.0,
             })
 
     # 6. Gelbe Ampel Einzelposition (zwischen Ziel und Maximum) -> Aufstockung/Reduzierung.
+    #    Nur Satellite-Positionen (Core-ETFs werden nicht gegen das
+    #    Satellite-Zielband geprueft).
     if sp_light.get("status") == "yellow" and target_pos:
         for p in positions:
-            if target_pos < p.get("weight", 0) <= max_pos:
+            if p.get("category") == "satellite" and target_pos < p.get("weight", 0) <= max_pos:
                 candidates.append({
                     "action": "reduzieren",
                     "isin": p.get("isin", ""),
@@ -1952,13 +2012,16 @@ def build_position_actions(
                     "reason": "Einzelposition zwischen Ziel und Maximum.",
                     "gegenargument": _ACTION_COUNTER_ARGUMENTS["reduzieren"],
                     "priority": _ACTION_PRIORITY["single_position_yellow"],
+                    "category": _ACTION_CATEGORIES["single_position_yellow"],
                     "deviation": p.get("weight", 0) - target_pos,
                 })
 
     # 7. Untergewichtung (Gewicht < Ziel) -> Aufstockung (bei positiver/aktiver These).
+    #    Nur Satellite-Positionen (Core-ETFs werden nicht gegen das
+    #    Satellite-Zielband geprueft — kein "aufstocken" fuer Core).
     if target_pos:
         for p in positions:
-            if p.get("weight", 0) < target_pos:
+            if p.get("category") == "satellite" and p.get("weight", 0) < target_pos:
                 candidates.append({
                     "action": "aufstocken",
                     "isin": p.get("isin", ""),
@@ -1966,6 +2029,7 @@ def build_position_actions(
                     "reason": "Position unter dem Ziel.",
                     "gegenargument": _ACTION_COUNTER_ARGUMENTS["aufstocken"],
                     "priority": _ACTION_PRIORITY["underweight"],
+                    "category": _ACTION_CATEGORIES["underweight"],
                     "deviation": target_pos - p.get("weight", 0),
                 })
 
@@ -1983,14 +2047,20 @@ def build_position_actions(
 
 
 def _sector_overweight_positions(positions: list, max_sector: float) -> list[tuple[dict, float]]:
-    """Positionen in Sektoren ueber der Grenze (mit Sektor-Gesamtgewicht)."""
+    """Satellite-Positionen in Sektoren ueber der Grenze (mit Sektor-Gesamtgewicht).
+
+    Nur ``category=="satellite"``-Positionen (Plan: Core-ETFs/Legacy/unknown
+    sind keine Kandidaten fuer REDUCE wegen Sektorkonzentration). Sektor aus
+    explizitem ``sector``-Feld, sonst etf_lookup, sonst "Unknown".
+    """
     etf_lookup = load_etf_lookup()
+    satellite_positions = [p for p in positions if p.get("category") == "satellite"]
     sector_total: dict[str, float] = {}
-    for p in positions:
+    for p in satellite_positions:
         sector = p.get("sector") or etf_lookup.get(p.get("isin", ""), {}).get("sector") or "Unknown"
         sector_total[sector] = sector_total.get(sector, 0) + p.get("weight", 0)
     result: list[tuple[dict, float]] = []
-    for p in positions:
+    for p in satellite_positions:
         sector = p.get("sector") or etf_lookup.get(p.get("isin", ""), {}).get("sector") or "Unknown"
         if sector_total.get(sector, 0) > max_sector:
             result.append((p, sector_total[sector]))

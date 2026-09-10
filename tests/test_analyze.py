@@ -91,11 +91,16 @@ def test_drift_reads_core_pct_and_threshold_pct():
 
 
 def test_single_position_reads_satellite_limits_max_position_pct():
-    """Einzelposition-Limit aus satellite_limits.max_position_pct (5.0 -> 0.05)."""
+    """Einzelposition-Limit aus satellite_limits.max_position_pct (5.0 -> 0.05).
+
+    Nur Satellite-Positionen werden geprueft: der Satellite Apple (25%) ist
+    die groesste Satellite-Position und rot (25% >> 5%); der Core-ETF (75%)
+    wird NICHT gegen das Satellite-Limit geprueft.
+    """
     result = analyze.calculate_single_position_max(_positions(), REAL_STRATEGY)
     assert result["threshold"] == 0.05
-    assert result["max_position"]["name"] == "Vanguard FTSE All-World"
-    assert result["status"] == "red"  # 75% >> 5%
+    assert result["max_position"]["name"] == "Apple Inc."  # nur Satellite-Kandidaten
+    assert result["status"] == "red"  # Satellite bei 25% >> 5%
 
     ok = analyze.calculate_single_position_max(
         [
@@ -113,7 +118,12 @@ def test_single_position_reads_satellite_limits_max_position_pct():
 
 
 def test_sector_concentration_reads_max_sector_pct_with_etf_lookup():
-    """Sektor-Grenzwert aus satellite_limits.max_sector_pct; Klassifikation via etf_lookup."""
+    """Sektor-Grenzwert aus satellite_limits.max_sector_pct.
+
+    Nur Satellite-Positionen fliessen in die Sektor-Summe ein: der Core-ETF
+    (9000 EUR, Diversified) ist ausgeschlossen — nur Apple (1000 EUR,
+    Satellite) zaehlt, Sektor "Unknown" -> 100% -> red.
+    """
     positions = [
         {
             "isin": "IE00BK5BQT80",
@@ -134,8 +144,8 @@ def test_sector_concentration_reads_max_sector_pct_with_etf_lookup():
     ]
     result = analyze.calculate_sector_concentration(positions, REAL_STRATEGY)
     assert result["threshold"] == 0.15
-    assert result["max_sector"] == "Diversified"  # aus config/etf_lookup.json
-    assert result["max_ratio"] == 0.9
+    assert result["max_sector"] == "Unknown"  # Core-ETF (Diversified) nicht einbezogen
+    assert result["max_ratio"] == 1.0  # 100% Satellite in "Unknown"
     assert result["status"] == "red"
 
 
@@ -149,6 +159,367 @@ def test_sector_concentration_uses_holding_sector_field():
     assert result["max_ratio"] == 0.125
     assert result["max_sector"] == "s0"
     assert result["status"] == "green"  # 12.5% < 90% von 15%
+
+
+# --- Phase 2: Core/Satellite-Trennung (Plan portfolio-briefing-core-classification) ---
+#
+# Core-Positionen duerfen NICHT gegen Satellite-Positionslimits geprueft
+# werden und erzeugen keine REDUCE-Aktionen. Satellite-Positionen bleiben
+# gegen die bestehenden Satellite-Limits geprueft. Legacy/unknown werden
+# separat behandelt und nicht als Satellite gewertet.
+
+
+def _core_and_satellite_positions() -> list:
+    """Core-ETF mit 50% Gewicht + Satellite mit 12% (ueber 10%-Limit der Tests)."""
+    return [
+        {
+            "isin": "IE00BK5BQT80",
+            "name": "Vanguard FTSE All-World",
+            "category": "core",
+            "value_eur": 5000.0,
+            "weight": 0.5,
+            "sector": "Diversified",
+        },
+        {
+            "isin": "US0378331005",
+            "name": "Apple Inc.",
+            "category": "satellite",
+            "value_eur": 1200.0,
+            "weight": 0.12,
+            "sector": "Technology",
+        },
+    ]
+
+
+def _strict_limits_strategy(max_position_pct: float = 10.0, max_sector_pct: float = 20.0) -> dict:
+    """Strategie mit hohen Satellite-Limits, damit Core nicht dagegen verstoesst."""
+    return {
+        "portfolio": {"core_pct": 70.0, "satellite_pct": 30.0, "rebalancing": {"threshold_pct": 5.0}},
+        "satellite_limits": {
+            "target_position_pct": 5.0,
+            "max_position_pct": max_position_pct,
+            "max_sector_pct": max_sector_pct,
+        },
+    }
+
+
+def test_single_position_core_50_percent_not_violation():
+    """Core bei 50% ist keine Satellite-Einzelposition-Limitverletzung (status green)."""
+    result = analyze.calculate_single_position_max(_core_and_satellite_positions(), _strict_limits_strategy())
+    assert result["threshold"] == 0.10
+    # Groesste Satellite-Position ist Apple (12%) — nicht der Core-ETF (50%).
+    assert result["max_position"]["name"] == "Apple Inc."
+    assert result["max_position"]["weight"] == 0.12
+    assert result["status"] == "red"  # Satellite bei 12% > 10% -> echte Verletzung
+
+
+def test_single_position_core_only_no_satellite_green():
+    """Nur Core-ETFs (alle > Satellite-Limit) -> keine Satellite-Verletzung (green)."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 5000.0, "weight": 0.5},
+        {"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World", "category": "core", "value_eur": 5000.0, "weight": 0.5},
+    ]
+    result = analyze.calculate_single_position_max(positions, _strict_limits_strategy())
+    assert result["max_position"] is None
+    assert result["status"] == "green"
+
+
+def test_single_position_satellite_over_limit_red():
+    """Satellite ueber max_position_pct bleibt rot."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 6000.0, "weight": 0.6},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 4000.0, "weight": 0.4},
+    ]
+    result = analyze.calculate_single_position_max(positions, REAL_STRATEGY)
+    assert result["max_position"]["name"] == "Apple Inc."
+    assert result["status"] == "red"
+
+
+def test_sector_concentration_core_not_in_sector_sum():
+    """Core-ETFs sind nicht in der Satellite-Sektorsumme (nur Satellite zaehlt)."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 9000.0, "weight": 0.9, "sector": "Technology"},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.1, "sector": "Technology"},
+    ]
+    result = analyze.calculate_sector_concentration(positions, _strict_limits_strategy(max_sector_pct=50.0))
+    # Core (9000, Technology) ausgeschlossen -> nur Apple (1000) -> 100% Technology.
+    assert result["max_sector"] == "Technology"
+    assert result["max_ratio"] == 1.0
+    assert result["status"] == "red"  # 100% > 50%
+
+
+def test_sector_concentration_core_only_green():
+    """Nur Core-ETFs (beliebig gross) -> keine Satellite-Sektorkonzentration."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 8000.0, "weight": 0.8, "sector": "Technology"},
+        {"isin": "IE00B4L5Y983", "name": "iShares World", "category": "core", "value_eur": 2000.0, "weight": 0.2, "sector": "Technology"},
+    ]
+    result = analyze.calculate_sector_concentration(positions, REAL_STRATEGY)
+    assert result["max_ratio"] == 0.0
+    assert result["status"] == "green"
+
+
+def test_sector_concentration_satellite_over_limit_red():
+    """Satellite-Sektorkonzentration bleibt rot (3 Technology-Satellites bei 25%)."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.1, "sector": "Technology"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 1000.0, "weight": 0.1, "sector": "Technology"},
+        {"isin": "US02079K3059", "name": "Alphabet Inc.", "category": "satellite", "value_eur": 500.0, "weight": 0.05, "sector": "Technology"},
+        {"isin": "US88579Y1010", "name": "3M Co.", "category": "satellite", "value_eur": 500.0, "weight": 0.05, "sector": "Industrials"},
+    ]
+    result = analyze.calculate_sector_concentration(positions, _strict_limits_strategy(max_sector_pct=20.0))
+    assert result["max_sector"] == "Technology"
+    assert result["max_ratio"] == 0.8333  # 2500/3000 nur Satellite-Werte
+    assert result["status"] == "red"  # 83% > 20%
+
+
+def test_sector_overweight_positions_excludes_core():
+    """_sector_overweight_positions liefert nur Satellite-Positionen (keine Core)."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 7000.0, "weight": 0.7, "sector": "Technology"},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1500.0, "weight": 0.15, "sector": "Technology"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 1500.0, "weight": 0.15, "sector": "Technology"},
+    ]
+    overweight = analyze._sector_overweight_positions(positions, 0.20)
+    isins = {p["isin"] for p, _w in overweight}
+    assert isins == {"US0378331005", "US5949724083"}  # Satellite, nicht Core
+    assert all(p["category"] == "satellite" for p, _w in overweight)
+
+
+def test_sector_overweight_positions_excludes_unknown_and_legacy():
+    """Legacy/unknown werden nicht als Satellite in _sector_overweight gewertet."""
+    positions = [
+        {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": 0.0, "weight": 0.0, "sector": "Software"},
+        {"isin": "XX0000000001", "name": "Unbekannt", "category": "unknown", "value_eur": 4000.0, "weight": 0.4, "sector": "Technology"},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 6000.0, "weight": 0.6, "sector": "Technology"},
+    ]
+    overweight = analyze._sector_overweight_positions(positions, 0.20)
+    isins = {p["isin"] for p, _w in overweight}
+    assert isins == {"US0378331005"}  # nur Satellite
+    assert all(p["category"] == "satellite" for p, _w in overweight)
+
+
+def test_position_actions_no_core_reduce():
+    """Keine REDUCE-Aktion fuer Core-ETFs (auch bei roter Einzelposition-Ampel)."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 5000.0, "weight": 0.5},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1200.0, "weight": 0.12},
+    ]
+    # Rote Einzelposition-Ampel (nur-Satellite-Check) -> nur Satellite-Kandidaten.
+    lights = {
+        "single_position": {"status": "red", "reason": "Position über dem Maximum."},
+        "sector_concentration": {"status": "green", "reason": "ok"},
+        "thesis_deadlines": {"status": "green", "reason": "ok"},
+        "turnover": {"status": "green", "reason": "ok"},
+    }
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy())
+    core_actions = [a for a in actions if a["isin"] == "IE00BK5BQT80"]
+    assert not core_actions  # keine Aktion fuer den Core-ETF
+    satellite_actions = [a for a in actions if a["isin"] == "US0378331005"]
+    assert satellite_actions  # Satellite bleibt Kandidat
+    assert all(a["action"] == "reduzieren" for a in satellite_actions)
+
+
+def test_position_actions_core_only_green_lights_no_reduce():
+    """Nur Core-ETFs ueber Limit -> keine REDUCE-Aktionen (Ampel green)."""
+    positions = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "value_eur": 9000.0, "weight": 0.9},
+    ]
+    lights = {
+        "single_position": {"status": "green", "reason": "Keine Satellite-Position über dem Limit."},
+        "sector_concentration": {"status": "green", "reason": "ok"},
+        "thesis_deadlines": {"status": "green", "reason": "ok"},
+        "turnover": {"status": "green", "reason": "ok"},
+    }
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy())
+    assert all(a["isin"] != "IE00BK5BQT80" for a in actions)
+    assert not any(a["action"] == "reduzieren" for a in actions)
+
+
+# --- Phase B: position_actions-Semantik akut vs. band_review -----------------
+
+def _green_action_lights(**overrides: dict) -> dict:
+    """Ampel-Basis (alles green) fuer build_position_actions-Szenarien."""
+    lights = {
+        "single_position": {"status": "green", "reason": "ok"},
+        "sector_concentration": {"status": "green", "reason": "ok"},
+        "thesis_deadlines": {"status": "green", "reason": "ok"},
+        "turnover": {"status": "green", "reason": "ok"},
+    }
+    lights.update(overrides)
+    return lights
+
+
+def test_action_categories_akut_vs_band_review():
+    """Kategorie-Mapping (Phase B): echte Signale akut, Band-/Ziel-Hinweise band_review."""
+    assert analyze._ACTION_CATEGORIES == {
+        "single_position_red": "akut",
+        "sector_red": "akut",
+        "thesis_red": "akut",
+        "perf_negative": "akut",
+        "turnover_red": "akut",
+        "single_position_yellow": "band_review",
+        "underweight": "band_review",
+    }
+
+
+def test_position_actions_single_position_red_category_akut():
+    """Rote Einzelposition (ueber Maximum) -> reduzieren mit category 'akut'."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1200.0, "weight": 0.12},
+    ]
+    lights = _green_action_lights(
+        single_position={"status": "red", "reason": "Einzelposition über dem Maximum."}
+    )
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy())
+    assert actions
+    assert actions[0]["priority"] == analyze._ACTION_PRIORITY["single_position_red"]
+    assert all(a["category"] == "akut" for a in actions)
+
+
+def test_position_actions_sector_red_category_akut():
+    """Rote Sektor-Konzentration -> reduzieren mit category 'akut'."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.10, "sector": "Technology"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 1000.0, "weight": 0.10, "sector": "Technology"},
+    ]
+    lights = _green_action_lights(
+        sector_concentration={"status": "red", "reason": "Sektor über Grenze."}
+    )
+    actions = analyze.build_position_actions(
+        positions, lights, _strict_limits_strategy(max_sector_pct=15.0)
+    )
+    assert actions
+    assert all(a["priority"] == analyze._ACTION_PRIORITY["sector_red"] for a in actions)
+    assert all(a["category"] == "akut" for a in actions)
+
+
+def test_position_actions_thesis_red_category_akut():
+    """Abgelaufene Thesis -> verkaufen mit category 'akut'."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.10},
+    ]
+    lights = _green_action_lights(
+        thesis_deadlines={"status": "red", "reason": "Thesis abgelaufen."}
+    )
+    analysis = {
+        "checks": {
+            "thesis_deadlines": {
+                "status": "red",
+                "outdated": [{"file": "US0378331005-apple.md", "created": "2025-01-01"}],
+            }
+        }
+    }
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy(), analysis=analysis)
+    assert actions
+    assert actions[0]["priority"] == analyze._ACTION_PRIORITY["thesis_red"]
+    assert actions[0]["action"] == "verkaufen"
+    assert actions[0]["category"] == "akut"
+
+
+def test_position_actions_perf_negative_category_akut():
+    """Negativ-6M-Performance (Datenfeld vorhanden) -> reduzieren, category 'akut'."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1200.0, "weight": 0.12, "position_perf_6m_pct": -0.05},
+    ]
+    actions = analyze.build_position_actions(positions, _green_action_lights(), _strict_limits_strategy())
+    assert actions
+    assert actions[0]["priority"] == analyze._ACTION_PRIORITY["perf_negative"]
+    assert actions[0]["category"] == "akut"
+
+
+def test_position_actions_turnover_red_category_akut():
+    """Roter Umschlag -> Reduktion des staerksten Beitragszahlers, category 'akut'."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.05},
+    ]
+    lights = _green_action_lights(turnover={"status": "red", "reason": "Umschlag zu hoch."})
+    transactions = [
+        {"date": "2026-01-15", "isin": "US0378331005", "type": "buy", "quantity": 10, "price_eur": 400.0}
+    ]
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy(), transactions=transactions)
+    assert actions
+    assert actions[0]["priority"] == analyze._ACTION_PRIORITY["turnover_red"]
+    assert actions[0]["category"] == "akut"
+
+
+def test_position_actions_yellow_and_underweight_category_band_review():
+    """Gelbe Zielband-Position und Untergewicht -> category 'band_review'
+    (Quartals-Review-Hinweise, keine akute Handlung)."""
+    positions = [
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 800.0, "weight": 0.08, "sector": "Technology"},
+        {"isin": "US5949724083", "name": "NVIDIA Corp.", "category": "satellite", "value_eur": 300.0, "weight": 0.03, "sector": "Health"},
+    ]
+    lights = _green_action_lights(
+        single_position={"status": "yellow", "reason": "Einzelposition zwischen Ziel und Maximum."}
+    )
+    actions = analyze.build_position_actions(positions, lights, _strict_limits_strategy())
+    # Apple 8% zwischen Ziel (5%) und Max (10%) -> reduzieren (yellow);
+    # NVIDIA 3% < Ziel -> aufstocken (underweight). Beides band_review.
+    assert len(actions) == 2
+    assert {a["action"] for a in actions} == {"reduzieren", "aufstocken"}
+    assert all(a["category"] == "band_review" for a in actions)
+    assert {a["priority"] for a in actions} == {
+        analyze._ACTION_PRIORITY["single_position_yellow"],
+        analyze._ACTION_PRIORITY["underweight"],
+    }
+
+
+def test_traffic_lights_single_position_core_only_green():
+    """Einzelposition-Ampel: green bei nur Core-ETFs ueber Limit.
+
+    max_position ist None (keine Satellite-Kandidaten) -> green mit
+    "Keine Satellite-Position über dem Limit."
+    """
+    analysis = {
+        "checks": {
+            "positions": {"positions": [{"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "weight": 0.5}]},
+            "single_position": {"max_position": None, "status": "green"},
+            "sector_concentration": {"max_sector": "Unknown", "max_ratio": 0.0, "status": "green"},
+            "core_satellite": {"core_ratio": 0.5, "status": "green"},
+            "thesis_deadlines": {"outdated": [], "status": "green"},
+            "turnover": {"turnover_ratio": 0.0, "status": "green"},
+            "trades_per_quarter": {"trade_count": 0, "max_trades_per_quarter": 5, "status": "green"},
+            "drift": {"drift": 0.0, "status": "green"},
+        }
+    }
+    lights = analyze.build_traffic_lights(analysis, REAL_STRATEGY, {"status": "ok", "issues": []})
+    assert lights["single_position"]["status"] == "green"
+    assert "Keine Satellite-Position" in lights["single_position"]["reason"]
+
+
+def test_traffic_lights_single_position_satellite_over_limit_red():
+    """Einzelposition-Ampel: red bei Satellite ueber max_position_pct."""
+    analysis = {
+        "checks": {
+            "positions": {"positions": [
+                {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "weight": 0.6},
+                {"isin": "IE00BK5BQT80", "name": "Vanguard", "category": "core", "weight": 0.4},
+            ]},
+            "single_position": {"max_position": {"name": "Apple Inc.", "weight": 0.6}, "status": "red"},
+            "sector_concentration": {"max_sector": "Technology", "max_ratio": 0.6, "status": "red"},
+            "core_satellite": {"core_ratio": 0.4, "status": "red"},
+            "thesis_deadlines": {"outdated": [], "status": "green"},
+            "turnover": {"turnover_ratio": 0.0, "status": "green"},
+            "trades_per_quarter": {"trade_count": 0, "max_trades_per_quarter": 5, "status": "green"},
+            "drift": {"drift": 0.4, "status": "red"},
+        }
+    }
+    lights = analyze.build_traffic_lights(analysis, REAL_STRATEGY, {"status": "ok", "issues": []})
+    assert lights["single_position"]["status"] == "red"
+    assert "Apple Inc." in lights["single_position"]["reason"]
+
+
+def test_sector_overweight_positions_legacy_not_satellite():
+    """Legacy/unknown tauchen in _sector_overweight nie als Satellite auf."""
+    positions = [
+        {"isin": "LU2722255754", "name": "SUSE", "category": "legacy", "value_eur": 0.0, "weight": 0.0, "sector": "Software"},
+        {"isin": "US0378331005", "name": "Apple Inc.", "category": "satellite", "value_eur": 1000.0, "weight": 0.1, "sector": "Software"},
+    ]
+    overweight = analyze._sector_overweight_positions(positions, 0.05)
+    isins = {p["isin"] for p, _w in overweight}
+    assert "LU2722255754" not in isins
+    assert isins == {"US0378331005"}
 
 
 def test_turnover_reads_max_turnover_annual_pct():
