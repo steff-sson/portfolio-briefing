@@ -126,7 +126,7 @@ def _load_env() -> None:
 
 def _archive(markdown: str, mode: str) -> Path:
     VAULT_DIR.mkdir(parents=True, exist_ok=True)
-    date = datetime.now().strftime("%Y-%m-%d")
+    date = datetime.now().strftime("%Y-%m-%d")  # noqa: DTZ005 - Datumsstempel nur, tz-unabhängig
     path = VAULT_DIR / f"{date}-{mode}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
@@ -213,7 +213,7 @@ def _send_message(token: str, chat_id: str, text: str, parse_mode: str | None) -
     except httpx.RequestError as e:
         logger.error("Telegram send failed: %s", _sanitize(str(e)))
         return SEND_FAILED
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - letzte Verteidigungslinie vor Fail-closed
         logger.error("Telegram send failed: %s", _sanitize(str(e)))
         return SEND_FAILED
 
