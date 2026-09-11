@@ -63,14 +63,18 @@ auftauchen: `scalable_submit_buy_order`, `scalable_cancel_order`,
 ### Phase B — Deterministik
 - `data.py` — Snapshot-Loader + Validatoren (quellenneutral). Toleriert Crypto-ETP-Nullbestände
   (`cryptoHoldings[].etpPositions[]` → `info`-Klasse, nur reale Bestände als Position).
-- `checks.py` — Grenzwerte aus `strategy.yaml`: >5%/Position, >15%/Sektor,
-  >10 Satellite-Positionen, Core/Satellite-Drift.
+- `checks.py` — Grenzwerte aus `strategy.yaml` (dort satellite- und core-Limits):
+  Satellite/Legacy-Sleeve-Prüflinge (Einzelposition > `satellite_limits.max_position_pct`,
+  Sektor > `satellite_limits.max_sector_pct`, > `satellite_limits.max_positions`),
+  Core/Konzentrations-Check (einzelne Core-Position > `core_limits.max_position_pct`,
+  Default 25 %, **warn**, kein Blocker) + Core/Satellite-Drift.
 - `fundamentals.py` — yfinance (~6 Felder qualitativ), sleep gegen Rate-Limit, fail-open.
 - `news.py` — MCP-News + RSS aus `config/feeds.json`, Ticker/ISIN-Match.
+  Rohschema-Mapping (headline→title, Verlags-Fallback).
 
 ### Phase C — Ausgabe
 - `brief.py` — **genau 1 LLM-Call** (config-determiniert, Default
-  `neuralwatt/deepseek-v4-flash`), Key `NEURALWATT_API_KEY` aus
+  `glm-5.3-flash` via `config/pipeline.yaml`), Key `NEURALWATT_API_KEY` aus
   `~/.config/automation/config.env` (automation-core-Konvention, nie selbst ausgeben).
   Ausgabe: Vorschläge `VERKAUFEN/REDUZIEREN/KAUF/HALT` je 1-2 Sätze + Bestätigungsfrage.
   „Keine Aktion nötig" ist explizit ein gutes Ergebnis.
@@ -100,7 +104,7 @@ Telegram, KEIN echter LLM-Call. Schreibt das gerenderte Briefing nach
 ## Testgate
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # muss vollständig grün sein (~40 kritische Tests)
+.venv/bin/python -m pytest tests/ -q     # muss vollständig grün sein (~71 Tests)
 .venv/bin/ruff check scripts/ tests/      # muss sauber sein
 ```
 
@@ -127,6 +131,9 @@ mode `alert`), Exit-Code 1. Re-Run am selben Tag möglich.
 
 ## Cron / Ops
 
-Cron-Eintrag (Mo 07:00) wird nach P3 via `~/github/automation-core/crontab.txt`
-aktiviert: `0 7 * * 1  cd ~/github/portfolio-briefing && .venv/bin/python scripts/run_briefing.py monday`.
-Healthcheck-Ping nur bei echtem Handlungsbedarf — **keine täglichen Vault-Notes**.
+Cron-Eintrag **live** (Mo 07:00):
+`0 7 * * 1  cd ~/github/portfolio-briefing && .venv/bin/python scripts/run_briefing.py monday`.
+SSoT-Konvention: `~/crontab.txt` ist die Single Source of Truth (nie Symlink);
+Änderungen laufen über `make sync-cron` + `make install-cron`, Check via
+`make check-cron` in `~/github/automation-core`. Healthcheck-Ping nur bei echtem
+Handlungsbedarf — **keine täglichen Vault-Notes**.

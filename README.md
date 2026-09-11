@@ -1,6 +1,6 @@
 # portfolio-briefing
 
-Wöchentliches Telegram-Briefing (Mo 07:00, geplant): Portfolio + Watchlist +
+Wöchentliches Telegram-Briefing (Mo 07:00, live): Portfolio + Watchlist +
 Fundamentaldaten + News gegen deine `strategy.yaml`, mit **konkreten Kauf-/
 Verkaufsvorschlägen als Bestätigungsfrage**. Du entscheidest — Orders legst du
 selbst in Scalable an. KISS: genau **1 LLM-Call** pro Briefing.
@@ -10,6 +10,9 @@ selbst in Scalable an. KISS: genau **1 LLM-Call** pro Briefing.
 ```
 Phase A — Daten         headless `opencode run` (Default-Agent + Projekt-MCP `scalable`,
                         READ_TOOLS-Guardrail) → data/*.json (gitignored)
+                        stdout-JSON-Handover: Agent gibt fenced JSON (Rohschema) via
+                        stdout zurück; run_briefing.py schreibt data/*.json
+                        deterministisch+atomar selbst.
 Phase B — Deterministik scripts/data.py, checks.py, fundamentals.py, news.py (Python,
                         cron-sicher, testbar)
 Phase C — Ausgabe       scripts/brief.py (1 LLM-Call) → sanity.py → render.py → send_telegram.py
@@ -53,10 +56,12 @@ python3 -m venv .venv
 
 ## Ops / Cron
 
-Geplant: Mo 07:00 via `~/github/automation-core/crontab.txt`
+Live: Mo 07:00
 (`0 7 * * 1  cd ~/github/portfolio-briefing && .venv/bin/python scripts/run_briefing.py monday`).
-Aktiviert erst nach P3 (echter Lauf). Telegram-Alert nur bei echtem
-Handlungsbedarf — keine täglichen Vault-Notes.
+SSoT-Konvention: `~/crontab.txt` ist die Single Source of Truth (nie Symlink),
+Änderungen über `make sync-cron` + `make install-cron` in
+`~/github/automation-core` — nicht direkt runterladen. Telegram-Alert nur bei
+echtem Handlungsbedarf — keine täglichen Vault-Notes.
 
 ## Fail-closed
 
