@@ -17,3 +17,7 @@ config/setup/
 .pytest_cache/
 .mypy_cache/
 .opencode/
+# Laufzeit-Snapshots (persönliche Kontodaten — nie committen)
+data/
+# Gerenderte Briefing-Artefakte
+reports/

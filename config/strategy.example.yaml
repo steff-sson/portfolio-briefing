@@ -112,3 +112,17 @@ holdings_classification:
       category: legacy
       confirmed: true
       source: user
+
+# optional — Watchlist (Beobachtungspositionen, 21 Live-Einträge ab 11.09.2026)
+#
+# Nur ISIN/Name/Typ — KEINE Order-/Kontodaten. Diese Sektion ist der
+# dokumentierte Startstand; der echte aktuelle Stand kommt bei jedem echten
+# Pull via data/watchlist.json (Phase A) und überschreibt diese Startwerte
+# nicht — sie dient als Reference + Seeds für den Loader.
+watchlist:
+  - isin: "IE00BK5BQT80"           # str — ISIN (Pflicht)
+    name: "Vanguard FTSE All-World (Acc)"   # str — Anzeigename
+    securityType: "ETF"            # str — Typ: ETF|STOCK|CRYPTO_ETP
+  - isin: "US0378331005"
+    name: "Apple Inc."
+    securityType: "STOCK"

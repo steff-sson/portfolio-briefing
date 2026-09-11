@@ -1,29 +1,67 @@
-# AGENTS.md — portfolio-briefing
+# AGENTS.md — portfolio-briefing (KISS-Rewrite v2)
 
 ## Projektbeschreibung
 
-Wöchentliche/monatliche Portfolio-Briefings per RSS-Filter, 1-LLM-Call-Generierung mit verify-Gate und Telegram-Alert.
+Wöchentliches Telegram-Briefing (Mo 07:00), das Portfolio + Watchlist +
+Fundamentaldaten + News gegen `strategy.yaml` prüft und **konkrete Kauf-/
+Verkaufsvorschläge mit Begründung** formuliert (als Bestätigungsfrage — Orders
+legt Stefan selbst in Scalable an). KISS: genau **1 LLM-Call** pro Briefing.
 
-## Pipeline (Phase 4 — 1-LLM-Call-Architektur)
+## Pipeline
 
 ```
-deterministic first → 1 LLM-Call (generate_draft) → Python verify → final_gate (verification-only, fail-closed) → Telegram/Vault
+Phase A — Daten (headless opencode run, Default-Agent + Projekt-MCP `scalable`)
+  → data/portfolio.json, data/watchlist.json, data/quotes.json, data/news.json
+Phase B — Deterministik (Python, cron-sicher, testbar)  scripts/data.py, checks.py,
+  fundamentals.py, news.py
+Phase C — Ausgabe  scripts/brief.py (1 LLM-Call) → sanity.py → render.py → send_telegram.py
 ```
 
-- **Deterministic first:** `sc_bridge` → `analyze` → `filter_news` → `facts.build_facts_package` (inkl. `deterministic_summary`, der einzigen erlaubten Zahlenquelle).
-- **Live-First-Daten:** produktiver Lauf via `snapshot.load_previous()` → `sc_bridge.refresh_from_sc()` (fail-closed, kein Mock) → `snapshot.capture()` → `diff.diff_snapshots()`; Persistenz nur über das Snapshot-Modul (`config/snapshot.current.json` + `config/snapshots/archive/`), kein `update_config`. Mock (`load_mock()`) nur im Dry-Run.
-- **1 LLM-Call:** `llm_briefing.generate_draft` (`deepseek-v4-flash` via NeuralWatt, Prompt `config/prompts/briefing.txt`) — Layman-Briefing NUR aus dem Faktenpaket. Keine Humanize-/Review-/Revise-Stufe. Ausgabe ist **reiner Text** (keine Markdown-Tabellen, keine Sternchen, keine `---`-Body-Trennzeilen; die Ampel-Emojis 🟢/🟡/🔴 sind ausdrücklich erlaubt); Aufzählungen als `- `-Zeilen, Leerzeilen zwischen Stichpunkten und um Sektions-Überschriften, Zielumfang 400–450 Wörter. Ampel-Status einheitlich als Ampel-Emojis 🟢/🟡/🔴 (Format C: nur das Emoji, kein Text-Label) am Zeilenanfang („ok" → 🟢), Gesamtstatus in der ersten Kurzlage-Zeile; Positionen nur in Kürzform (Name + Anteil + Ampel-Emoji), keine vollständige ISIN-Liste. Der Satellite-IST-Anteil ist `deterministic_summary.satellite_ratio` (aus den autoritativen Satellite-Werten), **nie** `strategy_thresholds_pct.satellite_pct` (Zielwert). Sektor-Anteile sind stets relativ zum Satellite-Umfang zu formulieren; ein „Unknown"-Sektor ist eine Datenlücke, kein echter Konzentrations-Alarm. Option 2: Watchlist-Kandidaten nur als Beobachtung/Review (Strategie-/Portfolio-Fit, News) — aus Kursen/News/Fit ist keine belastbare Gewinn-/Kursprognose ableitbar, keine Kauf-Empfehlung, keine Markt-Timing-/Rendite-Versprechen.
-- **Sektions-Contract (bindend für Prompt UND verify, 6 Pflichtsektionen in dieser Reihenfolge):**
-  1. `## Kurzlage` — Was ist passiert? (Ampeln + Top-Befunde erklärt)
-  2. `## Datenqualität` — Datenlage und was sie bedeutet
-  3. `## Sell-/Reduce-Signale (bestehende Satellites)` — unverändert aus Signalen
-  4. `## Watchlist-Signale` — unverändert aus Signalen
-  5. `## Empfehlung` — BUY/SELL/WATCH-Label 1:1 aus `deterministic_summary.recommendation` + Begründung/Counterargument aus den Signal-Dimensionen (keine neuen Fakten)
-  6. `## Nächster Schritt` — konkreter Handlungshinweis aus den Signalen
-- **Python verify:** `verify.verify_draft` — Sektions-Contract, Zahlen (vs. deterministic_summary, 1:1), Ticker/ISIN (vs. Portfolio), News-Referenz, Ampeln (7 Kategorien) + Empfehlungs-Label (1:1 aus `deterministic_summary.recommendation`) + Positionsvorschläge (max. 3) + Neukaufideen (max. 2, ≥2 unabhängige Quellen); erkennt LLM-Fehlerstrings. Reiner-Text-Gate: Markdown-Tabellen/Sternchen/`---`-Body-Trennzeilen blocken (major), Ampel-Emojis 🟢/🟡/🔴 sind erlaubt; Fundamentaldaten-Disclaimer genau einmal in den Signal-Sektionen; Option-2-Gate: Gewinn-/Kursprognose-, Kursziel- und Markt-Timing-/Rendite-Versprechen blocken (major, Verneinungen erlaubt). Prosa bleibt frei — verify prüft Label/Zahlen 1:1, nicht Formulierung.
-- **Final gate:** `verify.final_gate` — verification-only: blockt bei critical/major. minor/info blocken nie.
-- **Versand:** `render_markdown` (Vault, status `active`) + `send_telegram` (mode `alert` archiviert nie).
-- **`q4_tax_context.txt`:** bleibt — wird im Zeitraum Okt–Dez an `briefing.txt` angehängt (bestehender `_load_prompt`-Mechanismus).
+Aufruf-Level: `run_briefing.py` orchestriert `pull→check→fund→news→brief→sanity→render→send`.
+
+### Phase A — MCP-Pull (Default-Agent, KEIN eigener Agent)
+`cd ~/github/portfolio-briefing && opencode run "<read-only prompt>"`.
+Die projektspezifische `opencode.json` liefert den `scalable`-MCP (type remote,
+timeout 30000). `run_briefing.py` führt diesen Pull **nur im Live-Modus** aus.
+
+### Guardrail (hart) — ausschließlich Read-Tools
+Der Pull-Prompt fordert **nur** diese Read-Calls:
+
+```
+scalable_get_portfolio_holdings
+scalable_list_watchlist_items
+scalable_get_portfolio_cash_breakdown
+scalable_get_security_quote
+scalable_get_security_chart
+scalable_get_security_news
+scalable_list_portfolio_transactions
+scalable_get_account_profile
+```
+
+Diese Write-Tools existieren live und dürfen in **keinem Automationspfad**
+auftauchen: `scalable_submit_buy_order`, `scalable_cancel_order`,
+`scalable_add_watchlist_item`, `scalable_remove_watchlist_item`,
+`scalable_create_price_alert`, `scalable_remove_price_alert`,
+`scalable_upsert_savings_plan`, `scalable_remove_savings_plan`.
+
+### Phase B — Deterministik
+- `data.py` — Snapshot-Loader + Validatoren (quellenneutral). Toleriert Crypto-ETP-Nullbestände
+  (`cryptoHoldings[].etpPositions[]` → `info`-Klasse, nur reale Bestände als Position).
+- `checks.py` — Grenzwerte aus `strategy.yaml`: >5%/Position, >15%/Sektor,
+  >10 Satellite-Positionen, Core/Satellite-Drift.
+- `fundamentals.py` — yfinance (~6 Felder qualitativ), sleep gegen Rate-Limit, fail-open.
+- `news.py` — MCP-News + RSS aus `config/feeds.json`, Ticker/ISIN-Match.
+
+### Phase C — Ausgabe
+- `brief.py` — **genau 1 LLM-Call** (config-determiniert, Default
+  `neuralwatt/deepseek-v4-flash`), Key `NEURALWATT_API_KEY` aus
+  `~/.config/automation/config.env` (automation-core-Konvention, nie selbst ausgeben).
+  Ausgabe: Vorschläge `VERKAUFEN/REDUZIEREN/KAUF/HALT` je 1-2 Sätze + Bestätigungsfrage.
+  „Keine Aktion nötig" ist explizit ein gutes Ergebnis.
+- `sanity.py` — jede Ticker/ISIN/Zahl im Output muss im Input existieren (fail-closed).
+- `render.py` — Plain-Text + Ampel-Format C (nur 🟢/🟡/🔴, kein Text-Label).
+- `run_briefing.py` — Orchestrator.
+- `send_telegram.py` — Telegram + Vault-Archiv (behalten).
 
 ## Setup
 
@@ -33,52 +71,46 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
-## `sc login` / Erstlauf
-
-Für echte Daten muss `sc login` ausgeführt sein. Produktiver Lauf ist fail-closed ohne Mock-Fallback; der erste Lauf erzeugt den ersten Snapshot (Seed-Migration). Seed-Dateien `config/portfolio.json`/`config/transactions.json` sind entfernt.
-
-## sc-Session-Betrieb
-
-Session-Lifecycle des scalable.capital-CLI — offiziell bestätigt durch den Maintainer ([Issue #5](https://github.com/ScalableCapital/scalable-cli/issues/5), [Repo](https://github.com/ScalableCapital/scalable-cli)):
-
-- **Refresh-Token-Lebensdauer:** bis zu 7 Tage — danach ist immer ein neues interaktives `sc login` erforderlich.
-- **Idle-Timeout:** 24h ohne Nutzung — die Session verfällt nach einem Tag Inaktivität.
-- **Automatischer Refresh:** das CLI refresht die Session bei jeder Nutzung automatisch; bei Nutzung mind. 1×/24h bleibt sie bis zu 7 Tage aktiv.
-- **Login ist interaktiv (OAuth-Device-Flow):** human-oriented — es gibt **keinen dokumentierten non-interactive-/Cron-Login**. `sc login` wird ausschließlich vom User ausgeführt, nie von der Pipeline/Automation.
-- **Auth-Check:** `sc whoami --json` ist der de-facto Auth-Check (kein dedizierter `sc health`-Befehl). `healthcheck.py` führt ihn aus und hält die Session damit aktiv.
-- **Fehlerklassen:** `no_session` / `REFRESH_RELOGIN_REQUIRED` → `sc login` erforderlich; `secret_storage_unavailable` → System-/Keyring-Prüfung. `healthcheck.py` differenziert die Status; `sc_bridge.refresh_from_sc` wirft dafür spezifische Exceptions (handlungsorientierte Alerts).
-- **`session_backend=file`:** wird von diesem Projekt nur dokumentierend geprüft, **niemals automatisch überschrieben** (keine Änderung der sc-Konfiguration).
-
-## Cron-Setup (Healthcheck aktiv, Briefings offen)
-
-Der Healthcheck ist über die zentrale Crontab (`~/github/automation-core/crontab.txt`, Source of Truth, installiert als User-Crontab) täglich 06:00 aktiv. Die Briefing-Läufe sind noch nicht aktiviert:
-
-```bash
-0 8 * * 1 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monday
-0 18 * * 5 /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py friday
-30 8 1 * * /home/stef/github/portfolio-briefing/.venv/bin/python scripts/run_briefing.py monthly
-# Healthcheck 1× täglich 06:00 — hält sc-Session aktiv (sc whoami --json), vor Montag-Lauf 08:00
-# Aktiv via automation-core/crontab.txt: cd /home/stef/github/portfolio-briefing && .venv/bin/python scripts/healthcheck.py
-```
-
-## Testlauf (Mock-only, ohne API-Calls)
+## Dry-Run (Mock-only, keine externen Calls)
 
 ```bash
 .venv/bin/python scripts/run_briefing.py monday --dry-run
 ```
 
-Dry-Run nutzt ausschließlich `sc_bridge.load_mock()` (`tests/mock_data/`) — kein sc-Call, kein Snapshot-/Diff-Schreiben, kein Telegram; schreibt `{date}-{mode}-dryrun.md` (status `draft`).
+Dry-Run nutzt Fixtures aus `tests/mock_data/` (P0-Struktur) → KEIN MCP-Pull, KEIN
+Telegram, KEIN echter LLM-Call. Schreibt das gerenderte Briefing nach
+`reports/{date}-{mode}-dryrun.md` und gibt Exit 0 zurück.
 
-## Fail-closed
+## Testgate
 
-Jeder Fehler → kein Versand, keine Vault-Briefing-Datei, nur kurzer Alert (Telegram mode `alert`), Exit-Code 1. Re-Run am selben Tag möglich.
+```bash
+.venv/bin/python -m pytest tests/ -q     # muss vollständig grün sein (~40 kritische Tests)
+.venv/bin/ruff check scripts/ tests/      # muss sauber sein
+```
+
+Tests decken nur Phase B (checks-Mathe, snapshot-Loader/Validators,
+fundamentals-Parsing gemockt, news-Match, sanity, render) — keine Pipeline-/
+LLM-Integrationstests.
+
+## Persönliche Daten (nie committen)
+
+- `data/` (Laufzeit-Snapshots), `reports/`, `config/strategy.yaml`,
+  `config/pipeline.yaml` sind gitignored.
+- Im Repo nur Fixtures mit fiktiven Werten (keine PII, keine echten
+  ISIN-Mengen-Bestände; ISINs von Broad-ETFs sind ok).
 
 ## Config-Env-Variablen (nur Namen)
 
-In `~/.config/automation/config.env`:
+In `~/.config/automation/config.env`: `NEURALWATT_API_KEY`, `TELEGRAM_TOKEN`,
+`TELEGRAM_CHAT_ID`.
 
-- `NEURALWATT_API_KEY` — für den einzigen LLM-Call (`generate_draft`, `deepseek-v4-flash` via NeuralWatt)
-- `TELEGRAM_TOKEN` — Bot-Token für Alerts
-- `TELEGRAM_CHAT_ID` — Ziel-Chat für Alerts
+## Fail-closed
 
-Nicht-sensitive Pipeline-Defaults: `config/pipeline.example.yaml` (nur dokumentierend, wird nicht geladen).
+Jeder Fehler → kein Versand, kein Vault-Archiv, nur kurzer Alert (Telegram
+mode `alert`), Exit-Code 1. Re-Run am selben Tag möglich.
+
+## Cron / Ops
+
+Cron-Eintrag (Mo 07:00) wird nach P3 via `~/github/automation-core/crontab.txt`
+aktiviert: `0 7 * * 1  cd ~/github/portfolio-briefing && .venv/bin/python scripts/run_briefing.py monday`.
+Healthcheck-Ping nur bei echtem Handlungsbedarf — **keine täglichen Vault-Notes**.
