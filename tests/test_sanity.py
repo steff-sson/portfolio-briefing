@@ -46,3 +46,26 @@ def test_percent_must_have_input_basis():
     assert not any("ohne Input-Basis" in i and "5.0" in i for i in ok)
     bad = sanity.check_sanity("Anteil 99.5%", DATA)
     assert any("ohne Input-Basis" in i for i in bad)
+
+
+def test_eur_amount_must_match_input():
+    # 5.000 EUR existiert als value_eur (5000.0) im Input → ok.
+    ok = sanity.check_sanity("Wert ca. 5.000 EUR", DATA)
+    assert not any("ohne Input-Basis" in i for i in ok)
+
+
+def test_hallucinated_amount_flagged():
+    # 1.234 EUR existiert nicht im Input → Verletzung.
+    bad = sanity.check_sanity("Wert ca. 1.234 EUR", DATA)
+    assert any("ohne Input-Basis" in i for i in bad)
+
+
+def test_quantity_must_match_input():
+    # 600 existiert als value_eur (600.0) → ok (deutscher Dezimaltrenner 600,0 nicht im Input).
+    ok = sanity.check_sanity("Menge 600", DATA)
+    assert not any("ohne Input-Basis" in i and "600" in i for i in ok)
+
+
+def test_number_prose_without_numbers_ok():
+    # Prosa ohne Zahlen bleibt ohne Prüfung.
+    assert sanity.check_sanity("Keine Aktion nötig.", DATA) == []
