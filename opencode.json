@@ -1,10 +1,28 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "scalable-pull": {
+      "description": "P0/Phase-A Minimal-Agent: exclusively the scalable MCP, read-only data pull",
+      "mode": "primary",
+      "tools": {
+        "scalable_*": true,
+        "context7_*": false,
+        "exa_*": false,
+        "gh_grep_*": false,
+        "flightclaw_*": false,
+        "instagram_*": false,
+        "obsidian-vault_*": false,
+        "open-design_*": false,
+        "playwright_*": false
+      }
+    }
+  },
   "mcp": {
     "scalable": {
       "type": "remote",
       "url": "https://mcp.scalable.capital/mcp",
-      "enabled": true
+      "enabled": true,
+      "timeout": 30000
     }
   }
 }
