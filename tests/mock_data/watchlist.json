@@ -1,7 +1,10 @@
 [
-  {"isin": "US5949724083", "name": "NVIDIA Corp.", "ticker": "NVDA", "quantity": 0, "valuation": 1250.0, "valuation_currency": "EUR", "sector": "technology"},
-  {"isin": "DE000A3E00M1", "name": "IONOS Group SE", "ticker": "IOS", "quantity": 0, "valuation": null, "valuation_currency": null, "sector": "technology"},
-  {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World UCITS ETF", "quantity": 0, "valuation": 5000.0, "valuation_currency": "EUR"},
-  {"isin": "LU2722255754", "name": "SUSE", "quantity": 0, "valuation": null, "valuation_currency": null, "sector": "software"},
-  {"isin": "US88579Y1010", "name": "3M Co.", "ticker": "MMM", "quantity": 0, "valuation": 800.0, "valuation_currency": "EUR", "sector": "industrials"}
+  {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World (Acc)", "securityType": "ETF", "currentQuote": {"midPrice": 128.4, "currency": "EUR", "timestampUtc": "2026-09-11T06:58:00Z", "isOutdated": false}},
+  {"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World (Acc)", "securityType": "ETF", "currentQuote": {"midPrice": 105.2, "currency": "EUR", "timestampUtc": "2026-09-11T06:58:00Z", "isOutdated": false}},
+  {"isin": "US0378331005", "name": "Apple Inc.", "securityType": "STOCK", "ticker": "AAPL", "currentQuote": {"midPrice": 222.0, "currency": "USD", "timestampUtc": "2026-09-10T21:00:00Z", "isOutdated": false}},
+  {"isin": "DE0007164600", "name": "SAP SE", "securityType": "STOCK", "ticker": "SAP", "currentQuote": {"midPrice": 228.0, "currency": "EUR", "timestampUtc": "2026-09-11T06:57:00Z", "isOutdated": false}},
+  {"isin": "NL0010273215", "name": "ASML Holding N.V.", "securityType": "STOCK", "ticker": "ASML", "currentQuote": {"midPrice": 720.0, "currency": "EUR", "timestampUtc": "2026-09-11T06:57:00Z", "isOutdated": false}},
+  {"isin": "IE00BKM4GZ66", "name": "iShares Core MSCI EM IMI (Acc)", "securityType": "ETF", "currentQuote": {"midPrice": 57.4, "currency": "EUR", "timestampUtc": "2026-09-11T06:58:00Z", "isOutdated": false}},
+  {"isin": "US5949724083", "name": "NVIDIA Corp.", "securityType": "STOCK", "ticker": "NVDA", "currentQuote": {"midPrice": 121.0, "currency": "USD", "timestampUtc": "2026-09-10T21:00:00Z", "isOutdated": false}},
+  {"isin": "US67066G1040", "name": "NOVO-B", "securityType": "STOCK", "ticker": "NOVO-B", "currentQuote": {"midPrice": 810.0, "currency": "DKK", "timestampUtc": "2026-09-11T06:50:00Z", "isOutdated": false}}
 ]

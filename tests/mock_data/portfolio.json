@@ -1,12 +1,61 @@
 {
+  "captured_at": "2026-09-11T07:00:00+00:00",
+  "mode": "monday",
+  "cash_eur": 350.0,
   "holdings": [
-    {"isin": "IE00BK5BQT80", "name": "Vanguard FTSE All-World", "quantity": 15, "value_eur": 1850.00, "category": "core"},
-    {"isin": "IE00B4L5Y983", "name": "iShares Core MSCI World", "quantity": 10, "value_eur": 920.00, "category": "core"},
-    {"isin": "US0378331005", "name": "Apple Inc.", "quantity": 12, "value_eur": 2400.00, "category": "satellite", "ticker": "AAPL"},
-    {"isin": "NL0010273215", "name": "ASML Holding", "quantity": 3, "value_eur": 2100.00, "category": "satellite", "ticker": "ASML"},
-    {"isin": "DE0007164600", "name": "SAP SE", "quantity": 8, "value_eur": 960.00, "category": "satellite", "ticker": "SAP"},
-    {"isin": "DK0062498333", "name": "Novo Nordisk", "quantity": 20, "value_eur": 1450.00, "category": "satellite", "ticker": "NOVO-B"}
+    {
+      "isin": "IE00BK5BQT80",
+      "name": "Vanguard FTSE All-World (Acc)",
+      "securityType": "ETF",
+      "savingsPlan": true,
+      "currentQuote": {"currency": "EUR", "midPrice": 128.4, "timestamp": "2026-09-11T06:58:00Z"},
+      "position": {"blocked": 0, "filled": 35, "pending": 0}
+    },
+    {
+      "isin": "IE00B4L5Y983",
+      "name": "iShares Core MSCI World (Acc)",
+      "securityType": "ETF",
+      "savingsPlan": true,
+      "currentQuote": {"currency": "EUR", "midPrice": 105.2, "timestamp": "2026-09-11T06:58:00Z"},
+      "position": {"blocked": 0, "filled": 30, "pending": 0}
+    },
+    {
+      "isin": "US0378331005",
+      "name": "Apple Inc.",
+      "securityType": "STOCK",
+      "savingsPlan": false,
+      "ticker": "AAPL",
+      "currentQuote": {"currency": "USD", "midPrice": 222.0, "timestamp": "2026-09-11T06:57:00Z"},
+      "position": {"blocked": 0, "filled": 8, "pending": 0}
+    },
+    {
+      "isin": "DE0007164600",
+      "name": "SAP SE",
+      "securityType": "STOCK",
+      "savingsPlan": false,
+      "ticker": "SAP",
+      "currentQuote": {"currency": "EUR", "midPrice": 228.0, "timestamp": "2026-09-11T06:57:00Z"},
+      "position": {"blocked": 0, "filled": 6, "pending": 0}
+    },
+    {
+      "isin": "NL0010273215",
+      "name": "ASML Holding",
+      "securityType": "STOCK",
+      "savingsPlan": false,
+      "ticker": "ASML",
+      "currentQuote": {"currency": "EUR", "midPrice": 720.0, "timestamp": "2026-09-11T06:57:00Z"},
+      "position": {"blocked": 0, "filled": 3, "pending": 0}
+    }
   ],
-  "total_value_eur": 9680.00,
-  "cash_eur": 320.00
+  "cryptoHoldings": [
+    {
+      "name": "Crypto ETPs",
+      "etpPositions": [
+        {"isin": "DE000A3GM1F0", "name": "Bitcoin Tracker ETP", "position": {"filled": 1.5}},
+        {"isin": "DE000A3GM1G8", "name": "Ethereum Tracker ETP", "position": {"filled": 0}},
+        {"isin": "DE000A3GM1J2", "name": "Solana Tracker ETP", "position": {"filled": 0}},
+        {"isin": "DE000A3GM1K0", "name": "Cardano Tracker ETP", "position": {"filled": 0}}
+      ]
+    }
+  ]
 }
