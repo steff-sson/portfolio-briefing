@@ -67,3 +67,57 @@ def test_collect_news_combines_mcp_and_rss(monkeypatch):
     sources = {i["source"] for i in items}
     assert "mcp" in sources
     assert any(i["source"].startswith("rss:") for i in items)
+
+
+def test_collect_news_maps_real_nested_schema():
+    # Echtes MCP-Rohschema: sources[{headline, source, published}] → title/source/published.
+    raw = [
+        {
+            "isin": "DE0000000001", "name": "Fakten AG",
+            "published_at": "2026-09-11T08:00:00Z", "summary": "heute",
+            "sources": [
+                {"headline": "Fakten AG trumpft Quartal auf", "source": "reuters",
+                 "published": "2026-09-11T08:00:00Z"},
+                {"headline": "Fakten AG Kurs oben", "source": "handelsblatt",
+                 "published": "2026-09-11T09:00:00Z"},
+            ],
+        }
+    ]
+    items = news_mod.collect_news(raw, [], set(), set())
+    assert len(items) == 2  # ein Eintrag pro Quelle
+    assert {i["source"] for i in items} == {"reuters", "handelsblatt"}
+    assert all("Fakten AG" in i["title"] for i in items)
+    assert all(i["published"] for i in items)
+    assert all(i["isin"] == "DE0000000001" for i in items)
+
+
+def test_collect_news_skips_missing_source_title():
+    # Quelle ohne headline (leerer Titel) → übersprungen, keine leere News-Zeile.
+    raw = [
+        {
+            "isin": "DE0000000002", "name": "Leer GmbH", "summary": "nur summary",
+            "sources": [
+                {"headline": "", "source": "reuters", "published": "2026-09-11T08:00:00Z"},
+                {"headline": "  ", "source": "dpa", "published": "2026-09-11T08:00:00Z"},
+                {"headline": "Titel vorhanden", "source": "testverlag", "published": "2026-09-11T08:00:00Z"},
+            ],
+        }
+    ]
+    items = news_mod.collect_news(raw, [], set(), set())
+    assert len(items) == 1
+    assert items[0]["title"] == "Titel vorhanden"
+    assert items[0]["source"] == "testverlag"
+
+
+def test_collect_news_mcp_fallback_when_no_verlag():
+    # Quelle ohne source-Feld → Fallback 'mcp' statt leerem Verlag.
+    raw = [
+        {
+            "isin": "DE0000000003", "name": "X AG", "summary": "s",
+            "sources": [{"headline": "Schlagzeile ohne Verlag", "published": "2026-09-11T08:00:00Z"}],
+        }
+    ]
+    items = news_mod.collect_news(raw, [], set(), set())
+    assert len(items) == 1
+    assert items[0]["source"] == "mcp"
+    assert items[0]["title"] == "Schlagzeile ohne Verlag"

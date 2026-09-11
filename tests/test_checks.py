@@ -48,17 +48,16 @@ def test_position_limit_alarm_over_limit():
     assert sigs[0].subject == "US1"
 
 
-def test_position_limit_count_core_in_total():
-    # Einzelpositions-Grenze gilt relativ zum GESAMTPORTFOLIO (Stefan A):
-    # eine große Core-Position wird ebenso bewertet wie Satellites.
+def test_position_limit_ignores_core():
+    # User 2026-09-11: Einzelpositions-Limit ist Satellite-Regel. Eine große
+    # Core-Position löst KEINE Einzelpositions-Verletzung aus (Core wird separat
+    # über die Core-Konzentrations-Schwelle abgedeckt).
     holdings = [
         {"isin": "IE00BK5BQT80", "category": "core", "value_eur": 5000.0},
         {"isin": "US1", "category": "satellite", "value_eur": 100.0},
     ]
     sigs = checks.check_position_limits(holdings, 5.0)
-    assert len(sigs) == 1
-    assert sigs[0].kind == "position"
-    assert sigs[0].subject == "IE00BK5BQT80"  # Core-Position selbst wird geflaggt
+    assert sigs == []  # Core ignoriert; Satellite US1 ~2% < 5%
 
 
 def test_position_limit_basis_is_total_not_satellite():
@@ -130,3 +129,27 @@ def test_run_checks_composes_all_thresholds():
     kinds = {s.kind for s in sigs}
     assert "position" in kinds
     assert "sector" in kinds
+
+
+def test_core_concentration_warn_above_threshold():
+    # User 2026-09-11: einzelne Core-Position > Schwelle (25%) → warn (🟡),
+    # gemessen relativ zum GESAMTPORTFOLIO. Kein Blocker.
+    holdings = [
+        {"isin": "IE00BK5BQT80", "category": "core", "value_eur": 9000.0},
+        {"isin": "US1", "category": "satellite", "value_eur": 1000.0},
+    ]
+    sigs = checks.check_core_concentration(holdings, 25.0)
+    assert len(sigs) == 1
+    assert sigs[0].kind == "core_concentration"
+    assert sigs[0].severity == "warn"
+    assert sigs[0].subject == "IE00BK5BQT80"
+    assert "Core-Konzentration" in sigs[0].message
+
+
+def test_core_concentration_no_warn_below_threshold():
+    holdings = [
+        {"isin": "IE00BK5BQT80", "category": "core", "value_eur": 2000.0},
+        {"isin": "US1", "category": "satellite", "value_eur": 8000.0},
+    ]
+    sigs = checks.check_core_concentration(holdings, 25.0)
+    assert sigs == []  # Core 20% < 25% → kein Signal

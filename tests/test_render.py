@@ -65,3 +65,19 @@ def test_fundamentals_error_renders_yellow_not_green():
     assert "SAP: Fetch-Fehler" in text
     assert "Möchtest du" in text  # Vorschlag vorhanden → Bestätigungsfrage
 
+
+
+def test_core_position_line_is_neutral_green():
+    # Einzelpositions-Limit ist Satellite-Regel: Core-Zeile neutral 🟢,
+    # auch wenn der Anteil über der (Satellite-)Schwelle läge.
+    d = dict(DATA)
+    d["holdings"] = [
+        {"isin": "IE00BK5BQT80", "name": "Vanguard Core", "value_eur": 8000.0,
+         "category": "core"},
+        {"isin": "US0378331005", "name": "Apple Sat", "value_eur": 600.0,
+         "category": "satellite"},
+    ]
+    d["total_value_eur"] = 8600.0
+    text = render.render_briefing(d, max_position_pct=5.0, warn_position_pct=3.0)
+    assert "🟢 Vanguard Core — 93.0%" in text     # Core neutral
+    assert "🔴 Apple Sat — 7.0%" in text          # Satellite bekommt echte Ampel

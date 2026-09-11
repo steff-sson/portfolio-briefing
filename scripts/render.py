@@ -15,7 +15,7 @@ NONE_ACTION = "Keine Aktion nötig."
 
 
 def _severity_ampel(sev: str) -> str:
-    return {"red": RED, "yellow": YELLOW, "green": GREEN}.get(sev, GREEN)
+    return {"red": RED, "yellow": YELLOW, "warn": YELLOW, "green": GREEN}.get(sev, GREEN)
 
 
 def _position_pct(holding: dict, total: float) -> float:
@@ -67,11 +67,15 @@ def render_briefing(data: dict[str, Any], max_position_pct: float = 5.0,
             lines.append(f"{_severity_ampel(s.get('severity'))} {s.get('message')}")
         lines.append("")
 
-    # Positionen (Kurzform + Ampel)
+    # Positionen (Kurzform + Ampel). Einzelpositions-Limit ist Satellite-Regel:
+    # Core-Zeilen neutral (🟢), nur satellite/legacy bekommen die echte Ampel.
     lines.append("## Positionen")
     for h in data.get("holdings", []):
         pct = _position_pct(h, total)
-        amp = _ampel_for_position(pct, max_position_pct, warn_position_pct)
+        if str(h.get("category") or "").lower() == "core":
+            amp = GREEN
+        else:
+            amp = _ampel_for_position(pct, max_position_pct, warn_position_pct)
         lines.append(f"{amp} {h.get('name')} — {pct:.1f}%")
     lines.append("")
 

@@ -78,6 +78,56 @@ def fetch_rss(feeds: list[dict[str, str]], tickers: set[str], isins: set[str],
     return items
 
 
+def _expand_mcp_news(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expands one raw MCP-news item into quellenneutrale flat entries.
+
+    Real-Schema: ``{isin, name, published_at, summary, sources:[{headline, source,
+    published}]}``. Fixture/schon-flaches Schema: ``{isin, ticker, title, url,
+    publishedAt, source}``.
+
+    - Titel/Quelle/Datum werden aus dem Rohdatensatz gemappt (headline→title,
+      source→Verlag, published→Datum).
+    - Items ohne Titel werden übersprungen (keine leeren News-Zeilen).
+    - ``mcp`` als source nur als Fallback, wenn kein Verlag der Quelle vorliegt.
+    """
+    out: list[dict[str, Any]] = []
+    sources = item.get("sources")
+    if isinstance(sources, list):
+        # Echtes MCP-Schema: je Quelle ein Eintrag.
+        for src in sources:
+            title = str(src.get("headline") or "").strip()
+            if not title:
+                continue
+            source = str(src.get("source") or "").strip() or "mcp"
+            out.append(
+                {
+                    "source": source,
+                    "title": title,
+                    "url": str(item.get("url") or item.get("link") or ""),
+                    "published": str(src.get("published") or item.get("published_at") or ""),
+                    "isin": item.get("isin"),
+                    "ticker": item.get("ticker"),
+                }
+            )
+        return out
+
+    # Fixture/schon-flaches Schema.
+    title = str(item.get("title") or item.get("headline") or "").strip()
+    if not title:
+        return out
+    out.append(
+        {
+            "source": str(item.get("source") or "").strip() or "mcp",
+            "title": title,
+            "url": str(item.get("url") or item.get("link") or ""),
+            "published": str(item.get("publishedAt") or item.get("published") or ""),
+            "isin": item.get("isin"),
+            "ticker": item.get("ticker"),
+        }
+    )
+    return out
+
+
 def collect_news(
     mcp_news: list[dict[str, Any]],
     feeds: list[dict[str, str]],
@@ -87,15 +137,6 @@ def collect_news(
     """Kombiniert MCP-News (je Wertpapier) mit frischen RSS-Treffern."""
     items: list[dict[str, Any]] = []
     for n in mcp_news:
-        items.append(
-            {
-                "source": "mcp",
-                "title": str(n.get("title") or n.get("headline") or ""),
-                "url": str(n.get("url") or n.get("link") or ""),
-                "published": str(n.get("publishedAt") or n.get("timestamp") or ""),
-                "isin": n.get("isin"),
-                "ticker": n.get("ticker"),
-            }
-        )
+        items.extend(_expand_mcp_news(n))
     items.extend(fetch_rss(feeds, tickers, isins))
     return items

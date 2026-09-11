@@ -68,17 +68,21 @@ def calculate_ratios(holdings: list[dict[str, Any]]) -> tuple[float, float, floa
 
 
 def check_position_limits(holdings: list[dict[str, Any]], max_position_pct: float) -> list[Signal]:
-    """>5% pro Position, relativ zum GESAMTPORTFOLIO (Stefan-Entscheidung A).
+    """>max_position_pct% pro Position (Satellite-Regel), relativ zum GESAMTPORTFOLIO.
 
-    basis_pct = position_value / total_value * 100 über alle Positionen (auch
-    Core). Die Sektor- (15%) und Positions-Anzahl-Regel bleiben dagegen auf dem
-    Satellite-Sleeve (siehe check_sector_concentration / check_position_count).
+    User-Entscheidung 2026-09-11: Einzelpositions-Limit ist eine Satellite-Regel.
+    Core-Positionen lösen KEINE Einzelpositions-Verletzung aus (Core-Konzentration
+    wird separat per Core-Schwelle abgedeckt, siehe check_core_concentration).
+    Basis bleibt das Gesamtportfolio; die Sektor-/Anzahl-Regeln bleiben auf dem
+    Satellite-Sleeve.
     """
     signals: list[Signal] = []
     total = sum(_position_value(h) for h in holdings)
     if total <= 0:
         return signals
     for h in holdings:
+        if _isin_category(h) not in ("satellite", "legacy"):
+            continue  # Core: keine Einzelpositions-Verletzung
         pct = _position_value(h) / total * 100.0
         if pct > max_position_pct:
             signals.append(
@@ -188,6 +192,38 @@ def check_core_satellite_drift(holdings: list[dict[str, Any]], strategy: dict[st
     return signals
 
 
+def check_core_concentration(holdings: list[dict[str, Any]], max_position_pct: float) -> list[Signal]:
+    """Core-Konzentration: einzelne CORE-Position > Schwelle → warn (🟡).
+
+    User-Entscheidung 2026-09-11: eine einzelne Core-Position darf nicht zu stark
+    konzentrieren; Schwelle aus ``core_limits.max_position_pct`` (Default 25%).
+    Messung position/total relativ zum GESAMTPORTFOLIO. Warn (kein Blocker, kein
+    fail-closed auf dieser Stufe). Core-Positionen sind hier NICHT von der
+    Einzelpositions-Regel (Satellite) betroffen — diese Prüfung deckt Core ab.
+    """
+    signals: list[Signal] = []
+    total = sum(_position_value(h) for h in holdings)
+    if total <= 0:
+        return signals
+    for h in holdings:
+        if _isin_category(h) != "core":
+            continue
+        pct = _position_value(h) / total * 100.0
+        if pct > max_position_pct:
+            signals.append(
+                Signal(
+                    kind="core_concentration",
+                    severity="warn",
+                    subject=str(h.get("isin") or h.get("name")),
+                    message=(
+                        f"Core-Konzentration: {h.get('name')} ({h.get('isin')}) bei "
+                        f"{pct:.1f}% des Gesamtportfolios (Schwelle {max_position_pct:.0f}%)"
+                    ),
+                )
+            )
+    return signals
+
+
 def run_checks(
     holdings: list[dict[str, Any]],
     strategy: dict[str, Any] | None = None,
@@ -199,9 +235,11 @@ def run_checks(
     max_pos = float(limits.get("max_position_pct", 5.0))
     max_sector = float(limits.get("max_sector_pct", 15.0))
     max_count = int(limits.get("max_positions", 10))
+    core_max = float((strategy.get("core_limits") or {}).get("max_position_pct", 25.0))
 
     signals: list[Signal] = []
     signals.extend(check_position_limits(holdings, max_pos))
+    signals.extend(check_core_concentration(holdings, core_max))
     signals.extend(check_sector_concentration(holdings, max_sector))
     signals.extend(check_position_count(holdings, max_count))
     signals.extend(check_core_satellite_drift(holdings, strategy))
