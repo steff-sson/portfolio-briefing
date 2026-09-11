@@ -253,9 +253,17 @@ def _acquire_live_data(dry_run: bool) -> dict:
         )
 
     eurusd = _fetch_eurusd()
-    snap = data_mod.load_snapshot(DATA_DIR, eurusd=eurusd)
-    strategy = checks.load_strategy(str(STRATEGY_PATH))
-    data = _build_common(snap, strategy, eurusd)
+    try:
+        snap = data_mod.load_snapshot(DATA_DIR, eurusd=eurusd)
+        strategy = checks.load_strategy(str(STRATEGY_PATH))
+        data = _build_common(snap, strategy, eurusd)
+    except Exception as exc:  # Fail-closed: korrupte data/*.json
+        msg = (
+            "Portfolio-Briefing fehlgeschlagen: Daten-Snapshot nicht lesbar/verarbeitbar. "
+            "Bitte Snapshot prüfen (MCP re-auth)."
+        )
+        print(f"{msg} {type(exc).__name__}: {exc}")
+        raise AlertExit(msg) from exc
     data["snapshot_age_hours"] = _snapshot_age_hours()
     return data
 

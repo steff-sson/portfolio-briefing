@@ -105,3 +105,75 @@ def test_parse_watchlist_skips_missing_isin():
     assert items == []
     assert len(issues) == 1
     assert issues[0].severity == "warn"
+
+
+# --- Echtes Scalable-MCP-Schema (top-level midPrice/currency, PII-frei) ---
+
+def _write_portfolio(tmp_path, holdings, crypto=None):
+    import json
+    (tmp_path / "portfolio.json").write_text(
+        json.dumps({"collectedAt": "2026-09-11T08:00:00Z",
+                    "holdings": holdings, "cryptoHoldings": crypto or []}),
+        encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text(json.dumps([]), encoding="utf-8")
+
+
+def test_real_mcp_schema_top_level_midprice_normalizes_value(tmp_path):
+    # Echtes MCP-Schema: midPrice/currency auf Holding-Ebene (kein currentQuote).
+    holdings = [{
+        "isin": "DE0000000001", "name": "Fake Fonds", "currency": "EUR",
+        "midPrice": 120.0, "savingsPlan": False,
+        "position": {"blocked": 0, "filled": 10.0, "pending": 0},
+    }]
+    _write_portfolio(tmp_path, holdings)
+    snap = data_mod.load_snapshot(tmp_path)
+    h = snap.holdings[0]
+    assert h["quantity"] == 10.0
+    assert h["currency"] == "EUR"
+    assert h["value_eur"] == pytest.approx(10.0 * 120.0)
+    assert not any(i.severity == "error" for i in snap.issues)
+
+
+def test_real_mcp_schema_missing_midprice_is_warn_and_excluded(tmp_path):
+    # Gefüllte Position ohne midPrice → warn + Ausschluss aus Holdings/Total
+    # (Hinweisposten; User-Entscheidung 2026-09-11, illiquider Fall SUSE).
+    holdings = [{
+        "isin": "DE0000000002", "name": "Fake Ohne Preis", "currency": "EUR",
+        "position": {"blocked": 0, "filled": 5.0, "pending": 0},
+    }]
+    _write_portfolio(tmp_path, holdings)
+    snap = data_mod.load_snapshot(tmp_path)
+    assert not snap.has_fatal  # warn, kein Fehler
+    assert any("Kurs nicht verfügbar (illiquide?)" in i.message and i.severity == "warn"
+               for i in snap.issues)
+    # Positionsartefakt NICHT in holdings (kein LLM-Futter ohne Wert).
+    assert all(h["isin"] != "DE0000000002" for h in snap.holdings)
+
+
+def test_missing_price_position_excluded_from_total(tmp_path):
+    # Warn-Position (kein Kurs) trägt NICHT zum total bei; bewertete Position schon.
+    holdings = [
+        {"isin": "DE0000000002", "name": "Fake Ohne Preis", "currency": "EUR",
+         "position": {"filled": 5.0, "blocked": 0, "pending": 0}},
+        {"isin": "DE0000000003", "name": "Fake Mit Preis", "currency": "EUR",
+         "midPrice": 100.0, "position": {"filled": 2.0, "blocked": 0, "pending": 0}},
+    ]
+    _write_portfolio(tmp_path, holdings)
+    snap = data_mod.load_snapshot(tmp_path)
+    assert snap.total_value_eur == pytest.approx(2.0 * 100.0)
+    assert len(snap.holdings) == 1
+    assert snap.holdings[0]["isin"] == "DE0000000003"
+
+
+def test_real_mcp_schema_usd_top_level_midprice_converted(tmp_path):
+    # USD-Holding mit top-level midPrice/currency → EURUSD-Umrechnung.
+    holdings = [{
+        "isin": "US0000000001", "name": "Fake US Aktie", "currency": "USD",
+        "midPrice": 200.0, "position": {"filled": 8.0, "blocked": 0, "pending": 0},
+    }]
+    _write_portfolio(tmp_path, holdings)
+    snap = data_mod.load_snapshot(tmp_path, eurusd=1.08)
+    h = snap.holdings[0]
+    assert h["currency"] == "USD"
+    assert h["fx_applied"] is True
+    assert h["value_eur"] == pytest.approx(8.0 * 200.0 * 1.08)

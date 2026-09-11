@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
@@ -44,6 +45,16 @@ def load_llm_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def _num(v: Any, fmt: str) -> str:
+    """Formatiert einen optionalen Zahlenwert; None/nicht numerisch → 'n/a'."""
+    if v is None:
+        return "n/a"
+    try:
+        return format(v, fmt)
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 def _fact_package(data: dict) -> str:
     """Baut das deterministische Faktenpaket für den Prompt (kompakt)."""
     parts: list[str] = []
@@ -51,7 +62,7 @@ def _fact_package(data: dict) -> str:
     for h in data.get("holdings", []):
         parts.append(
             f"- {h.get('name')} ({h.get('isin')}) {h.get('category','?')} "
-            f"{h.get('value_eur',0):.0f} EUR {h.get('quantity',0):.2f}"
+            f"{_num(h.get('value_eur'), '.0f')} EUR {_num(h.get('quantity'), '.2f')}"
         )
     parts.append("WATCHLIST:")
     for w in data.get("watchlist", []):
@@ -59,9 +70,11 @@ def _fact_package(data: dict) -> str:
     parts.append("FUNDAMENTALS:")
     for f in data.get("fundamentals", []):
         parts.append(
-            f"- {f.get('ticker')}: fwdPE={f.get('forward_pe')} revG={f.get('revenue_growth')} "
-            f"earnG={f.get('earnings_growth')} d/e={f.get('debt_to_equity')} "
-            f"52w={f.get('position_52w')}"
+            f"- {f.get('ticker')}: fwdPE={_num(f.get('forward_pe'), '.1f')} "
+            f"revG={_num(f.get('revenue_growth'), '.1f')} "
+            f"earnG={_num(f.get('earnings_growth'), '.1f')} "
+            f"d/e={_num(f.get('debt_to_equity'), '.1f')} "
+            f"52w={_num(f.get('position_52w'), '.1f')}"
         )
     parts.append("NEWS:")
     for n in data.get("news", [])[:12]:
@@ -70,8 +83,10 @@ def _fact_package(data: dict) -> str:
     for s in data.get("signals", []):
         parts.append(f"- [{s.get('severity')}] {s.get('message')}")
     parts.append(
-        f"RATIOS: core={data.get('core_ratio')}% sat={data.get('satellite_ratio')}% "
-        f"total={data.get('total_value_eur',0):.0f} EUR cash={data.get('cash_eur',0):.0f} EUR"
+        f"RATIOS: core={_num(data.get('core_ratio'), '.0f')}% "
+        f"sat={_num(data.get('satellite_ratio'), '.0f')}% "
+        f"total={_num(data.get('total_value_eur'), '.0f')} EUR "
+        f"cash={_num(data.get('cash_eur'), '.0f')} EUR"
     )
     return "\n".join(parts)
 

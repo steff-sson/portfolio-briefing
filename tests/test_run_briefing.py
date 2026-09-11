@@ -142,3 +142,22 @@ def test_live_llm_failure_alerts(tmp_path, monkeypatch):
     assert rc == 1
     assert alerts and any("LLM" in a for a in alerts)
 
+
+
+def test_corrupt_snapshot_alerts_and_exits(tmp_path, monkeypatch):
+    # Korrupte data/*.json → AlertExit/Alert statt Crash (Fail-closed, P3-Next).
+    import scripts.run_briefing as rb
+
+    (tmp_path / "portfolio.json").write_text("{ kaputt", encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(rb, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(rb, "_pull_phase_a", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(rb, "_pull_phase_b", lambda: False)
+    monkeypatch.setattr(rb, "_fetch_eurusd", lambda: None)
+    alerts = []
+    monkeypatch.setattr(rb, "_send_alert", lambda msg, dry_run=False: alerts.append(msg) or False)
+
+    rc = rb.run("friday", dry_run=False)
+    assert rc == 1
+    assert alerts, "Korrupter Snapshot muss alerten (nie stumm)"
+    assert any("Snapshot" in a for a in alerts)

@@ -101,34 +101,53 @@ def _normalize_position(raw: dict[str, Any], eurusd: float | None = None,
                         issues: list[Issue] | None = None) -> dict[str, Any]:
     """Normalisiert eine Equity/Fund-Holding aus MCP/sc in das interne Modell.
 
+    Toleriert zwei Quellschemata: das Mock-Fixture
+    ``currentQuote{currency,midPrice}`` und das echte Scalable-MCP-Schema mit
+    top-level ``midPrice``/``currency`` (ohne currentQuote-Block).
+
     ``value_eur`` wird bevorzugt aus einem per-Position-EUR-Wert übernommen,
     sonst aus Menge × Mid-Kurs. Bei Nicht-EUR-Währung wird über ``eurusd``
     umgerechnet; fehlt der Kurs, bleibt ``value_eur=None`` (ausgeschlossen,
-    kein falscher EUR-Wert).
+    kein falscher EUR-Wert). Fehlt bereits der Mid-Preis bei gefüllter Position,
+    wird das als ``warn`` gemeldet und die Position via ``price_missing`` aus der
+    Analyse ausgeschlossen (Hinweisposten, kein LLM-Futter ohne Wert) —
+    User-Entscheidung 2026-09-11 (LU-Liquiditätsfall SUSE).
     """
     issues = issues if issues is not None else []
     isin = str(raw.get("isin") or "").strip()
     quote = raw.get("currentQuote") or {}
     position = raw.get("position") or {}
-    currency = str(quote.get("currency") or raw.get("valuation_currency") or _EUR).upper()
+    currency = str(
+        quote.get("currency") or raw.get("currency")
+        or raw.get("valuation_currency") or _EUR
+    ).upper()
     mid = quote.get("midPrice")
+    if mid is None:
+        mid = raw.get("midPrice")  # echtes MCP-Schema: top-level
     mid = mid.get("value") if isinstance(mid, dict) else mid
     filled = _d(position.get("filled") if position else raw.get("quantity"))
 
     value_eur = _per_position_value_eur(raw, currency)
     fx_applied = False
-    if value_eur is None and mid is not None and filled:
-        amount = filled * _d(mid)
-        if currency == _EUR:
-            value_eur = amount
-        elif eurusd:
-            value_eur = amount * eurusd
-            fx_applied = True
-        else:
-            value_eur = None
+    price_missing = False
+    if value_eur is None and filled:
+        if mid is None:
+            price_missing = True
             issues.append(
-                Issue("warn", f"{isin} ({currency}) ohne Umrechnung — aus total ausgeschlossen")
+                Issue("warn", f"{isin}: Kurs nicht verfügbar (illiquide?) — Position aus Analyse ausgeschlossen")
             )
+        elif mid is not None:
+            amount = filled * _d(mid)
+            if currency == _EUR:
+                value_eur = amount
+            elif eurusd:
+                value_eur = amount * eurusd
+                fx_applied = True
+            else:
+                value_eur = None
+                issues.append(
+                    Issue("warn", f"{isin} ({currency}) ohne Umrechnung — aus total ausgeschlossen")
+                )
 
     return {
         "isin": isin,
@@ -145,6 +164,7 @@ def _normalize_position(raw: dict[str, Any], eurusd: float | None = None,
         "savings_plan": bool(raw.get("savingsPlan", False)),
         "is_crypto_etp_zero": False,
         "fx_applied": fx_applied,
+        "price_missing": price_missing,
     }
 
 
@@ -184,13 +204,15 @@ def _normalize_etp(raw: dict[str, Any], eurusd: float | None = None,
 def _normalize_watchlist_item(raw: dict[str, Any]) -> dict[str, Any]:
     quote = raw.get("currentQuote") or {}
     mid = quote.get("midPrice")
+    if mid is None:
+        mid = raw.get("midPrice")  # echtes MCP-Schema: top-level
     mid = mid.get("value") if isinstance(mid, dict) else mid
     return {
         "isin": str(raw.get("isin") or "").strip(),
         "name": str(raw.get("name") or ""),
         "security_type": str(raw.get("securityType") or raw.get("security_type") or "UNKNOWN"),
         "ticker": raw.get("ticker"),
-        "currency": quote.get("currency") or "EUR",
+        "currency": quote.get("currency") or raw.get("currency") or "EUR",
         "mid_price": mid,
         "timestamp_utc": quote.get("timestampUtc") or quote.get("timestamp"),
         "is_outdated": bool(quote.get("isOutdated", False)),
@@ -207,6 +229,10 @@ def parse_portfolio(raw: dict[str, Any], eurusd: float | None = None) -> tuple[l
         pos = _normalize_position(h, eurusd=eurusd, issues=issues)
         if not pos["isin"]:
             issues.append(Issue("warn", "Portfolio-Position ohne ISIN übersprungen"))
+            continue
+        if pos["price_missing"]:
+            # Hinweisposten (warn-Issue bereits gesetzt) — aus Total/Checks/Faktpaket
+            # ausgeschlossen (kein LLM-Futter ohne Wert). User-Entscheidung 2026-09-11.
             continue
         if pos["isin"] in seen:
             issues.append(Issue("warn", f"Doppelte Position {pos['isin']} — letzte gewinnt"))
@@ -286,7 +312,10 @@ def load_snapshot(data_dir: str | Path, eurusd: float | None = None) -> Snapshot
     quotes_raw = read("quotes.json")
     news_raw = read("news.json")
 
-    snap.captured_at = portfolio.get("captured_at") or str(datetime.now(timezone.utc).isoformat())
+    snap.captured_at = (
+        portfolio.get("captured_at") or portfolio.get("collectedAt")
+        or str(datetime.now(timezone.utc).isoformat())
+    )
 
     for name in REQUIRED_DATA_FILES:
         if not (data_dir / name).exists():
