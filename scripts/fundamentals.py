@@ -112,3 +112,39 @@ def _extract(ticker: str, isin: str | None, info: dict[str, Any]) -> Fundamental
         )
     except Exception as exc:  # noqa: BLE001 - fail-open
         return Fundamental(ticker=ticker, isin=isin, error=f"Parse-Fehler: {exc}")
+
+
+def fetch_eurusd(config_path: str | None = None,
+                 default_fallback: float | None = None) -> float | None:
+    """Liefert den EURUSD-Kurs (fail-open, config-getrieben).
+
+    Priorität: 1) ``fx.eurusd`` aus config/pipeline.yaml (persönlich, optional),
+    2) yfinance ``EURUSD=X``-Quote, 3) ``default_fallback``. Scheitert alles →
+    None (Aufrufer schließt Nicht-EUR-Positionen dann ohne Umrechnung aus).
+    """
+    if config_path is None:
+        config_path = "config/pipeline.yaml"
+    try:
+        from pathlib import Path
+
+        import yaml
+
+        p = Path(config_path)
+        if p.exists():
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            fx = cfg.get("fx", {})
+            if fx.get("eurusd") is not None:
+                return _to_float(fx["eurusd"])
+    except Exception:  # noqa: BLE001, S110 - fail-open
+        pass
+
+    if yf is not None:
+        try:
+            info = yf.Ticker("EURUSD=X").fast_info
+            if info is not None and getattr(info, "last_price", None):
+                return _to_float(info.last_price)
+        except Exception:  # noqa: BLE001, S110 - fail-open
+            pass
+
+    return default_fallback if default_fallback is not None else None
+

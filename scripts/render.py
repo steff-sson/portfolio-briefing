@@ -19,7 +19,9 @@ def _severity_ampel(sev: str) -> str:
 
 
 def _position_pct(holding: dict, total: float) -> float:
-    return holding.get("value_eur", 0.0) / total * 100.0 if total else 0.0
+    # value_eur kann None sein (ohne Umrechnung ausgeschlossene Position).
+    value = holding.get("value_eur") or 0.0
+    return value / total * 100.0 if total else 0.0
 
 
 def _ampel_for_position(pct: float, max_pos_pct: float, warn_pct: float) -> str:
@@ -34,12 +36,23 @@ def render_briefing(data: dict[str, Any], max_position_pct: float = 5.0,
                     warn_position_pct: float = 3.0) -> str:
     """Baut das End-Briefing als Plain-Text (Ampel-Format C)."""
     lines: list[str] = []
-    total = data.get("total_value_eur", 0.0) or sum(h.get("value_eur", 0.0) for h in data.get("holdings", []))
+    total = data.get("total_value_eur", 0.0) or sum(
+        (h.get("value_eur") or 0.0) for h in data.get("holdings", [])
+    )
 
     # Kopf
     cap = data.get("captured_at") or datetime.now(timezone.utc).isoformat()
     lines.append(f"Portfolio-Briefing — {cap[:10]}")
     lines.append(f"Gesamtwert: {total:,.0f} EUR | Cash: {data.get('cash_eur', 0):,.0f} EUR")
+    # Alterswarnung (Fallback-Stufe 3: letzter Snapshot mit Alter).
+    age = data.get("snapshot_age_hours")
+    if age is not None:
+        lines.append(f"🟡 Achtung: Datengrundlage ist ein Snapshot von vor ~{age:.0f} h "
+                     f"(MCP re-auth / sc login bitte).")
+    # FX-Befund (find. 4): genutzte Feldnamen + Entscheidung.
+    fx_note = data.get("fx_note")
+    if fx_note:
+        lines.append(f"🟡 FX: {fx_note}")
     core = data.get("core_ratio")
     sat = data.get("satellite_ratio")
     if core is not None:

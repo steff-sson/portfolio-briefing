@@ -68,3 +68,18 @@ def test_fetch_fundamentals_fail_open(monkeypatch):
     by_ticker = {f.ticker: f for f in res}
     assert by_ticker["AAPL"].available
     assert by_ticker["ASML"].error is not None  # fail-open, kein Crash
+
+
+def test_fetch_eurusd_from_config(tmp_path):
+    p = tmp_path / "pipeline.yaml"
+    p.write_text("fx:\n  eurusd: 1.09\n", encoding="utf-8")
+    assert fundamentals.fetch_eurusd(str(p)) == pytest.approx(1.09)
+
+
+def test_fetch_eurusd_fallback_when_no_config(monkeypatch):
+    # Kein config-File, yf ohne EURUSD → Fallback-Wert.
+    monkeypatch.setattr(fundamentals, "yf", None)
+    assert fundamentals.fetch_eurusd("/nonexistent/pipeline.yaml", default_fallback=1.05) == pytest.approx(
+        1.05
+    )
+    assert fundamentals.fetch_eurusd("/nonexistent/pipeline.yaml") is None

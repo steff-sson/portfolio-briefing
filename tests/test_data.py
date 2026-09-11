@@ -42,6 +42,35 @@ def test_missing_required_file_is_error(tmp_path):
     assert any("Pflicht-Datei fehlt" in i.message for i in snap.issues)
 
 
+def test_usd_position_converted_with_eurusd():
+    # 8 AAPL à 222 USD = 1776 USD; mit EURUSD 1.08 → 1918.08 EUR.
+    snap = data_mod.load_snapshot(MOCK_DIR, eurusd=1.08)
+    apple = next(h for h in snap.holdings if h["isin"] == "US0378331005")
+    assert apple["currency"] == "USD"
+    assert apple["fx_applied"] is True
+    assert apple["value_eur"] == pytest.approx(1776.0 * 1.08)
+
+
+def test_usd_position_excluded_without_eurusd():
+    # Ohne Kurs darf eine USD-Position NICHT als EUR einfließen (kein falscher Wert).
+    snap = data_mod.load_snapshot(MOCK_DIR, eurusd=None)
+    apple = next(h for h in snap.holdings if h["isin"] == "US0378331005")
+    assert apple["value_eur"] is None
+    assert any("ohne Umrechnung" in i.message for i in snap.issues)
+    # Ausgeschlossene Position trägt NICHT zum total bei.
+    assert not any(
+        h["isin"] == "US0378331005" and (h.get("value_eur") or 0) > 0 for h in snap.holdings
+    )
+
+
+def test_eur_position_uses_quantity_times_mid():
+    snap = data_mod.load_snapshot(MOCK_DIR, eurusd=1.08)
+    sap = next(h for h in snap.holdings if h["isin"] == "DE0007164600")
+    assert sap["currency"] == "EUR"
+    assert sap["fx_applied"] is False
+    assert sap["value_eur"] == pytest.approx(6.0 * 228.0)
+
+
 def test_apply_strategy_classification():
     snap = data_mod.load_snapshot(MOCK_DIR)
     strategy = {
