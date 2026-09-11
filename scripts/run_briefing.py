@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -56,10 +58,54 @@ PULL_PROMPT = (
     "Du bist ein read-only Datensammler. Nutze AUSSCHLIESSLICH diese "
     "Scalable-Lese-Tools: " + ", ".join(READ_TOOLS) + ". "
     "Lade Portfolio-Holdings, Watchlist, Cash-Breakdown, Kurse/Charts und News "
-    "und schreibe die Rohdaten als JSON nach data/portfolio.json, "
-    "data/watchlist.json, data/quotes.json, data/news.json. "
-    "FÜHRE KEINE Order-/Schreib-Operationen aus. Keine Antwort benötigt."
+    "und gib die Rohdaten UNABHÄNGIG von ihrer ursprünglichen Tool-Antwort "
+    "zurück. Schreibe KEINE Dateien. Führe KEINE Order-/Schreib-Operationen aus.\n"
+    "\n"
+    "Antworte NUR mit EINEM fenced JSON-Block (```json ... ```) exakt dieser Form "
+    "(Rohschema der jeweiligen Tool-Antwort 1:1, unverändert):\n"
+    "{\n"
+    '  "portfolio":  <roh-Objekt aus scalable_get_portfolio_holdings inkl. cash/financialOverview>,\n'
+    '  "watchlist":  <roh-Array aus scalable_list_watchlist_items>,\n'
+    '  "quotes":     <roh-Array der scalable_get_security_chart/quotes-Antworten,\n'
+    "                 JEWEILS OHNE das grosse Zeitreihen-Feld dataPoints (nur isin/timeframe/\n"
+    "                 currency/source/closingReferencePoint)>,\n"
+    '  "news":       <roh-Array der scalable_get_security_news-Antworten>\n'
+    "}\n"
+    "WICHTIG: Das Gesamt-JSON muss in EINER Antwort vollständig passen. Reduziere nur "
+    "bei dataPoints die Menge (Klasse Zeitreihen-Grundwerte reichen), lasse sonst alle "
+    "Felder unverändert. Kein Text vor/nach dem JSON-Block."
 )
+
+
+def _extract_json_block(stdout: str) -> dict:
+    """Extrahiert den fenced JSON-Block aus der Agent-Stdout.
+
+    Bevorzugt ```json ... ```-Fence; fällt auf den rohen JSON-Anteil zurück.
+    Wirft ValueError, wenn kein JSON-Objekt gefunden/parsebar ist (fail-closed).
+    """
+    m = re.search(r"```json\s*(.+?)```", stdout, re.DOTALL)
+    candidates = [m.group(1).strip()] if m else []
+    if not candidates:
+        # Fallback: alles ab dem ersten "{" bis zum letzten "}" nehmen.
+        start = stdout.find("{")
+        end = stdout.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(stdout[start:end + 1])
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("Kein fenced JSON-Block in Agent-Stdout gefunden")
+
+
+def _write_atomic(path: Path, doc) -> None:
+    """Schreibt ein Dokument deterministisch + atomar (tmp + os.replace)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class AlertExit(Exception):
@@ -69,11 +115,25 @@ class AlertExit(Exception):
 # ---------------------------------------------------------------- Phase A/B
 
 def _pull_phase_a() -> None:
-    """Phase A: headless MCP-Pull (Default-Agent, Projekt-MCP scalable)."""
+    """Phase A: headless MCP-Pull (Default-Agent, Projekt-MCP scalable).
+
+    Der Agent gibt NUR einen fenced JSON-Block (4 Rohdokumente) via stdout
+    zurück; wir parsen und schreiben die Dateien hier selbst deterministisch
+    (atomar tmp+replace). Kein Verlassen auf Agent-Schreibrechte/Delegation.
+    Fehler/Timeout → aufrufende Fail-Chain (letzter Snapshot + Alert, fail-closed).
+    """
     DATA_DIR.mkdir(exist_ok=True)
     cmd = ["opencode", "run", PULL_PROMPT]
-    print("[phase A] MCP-Pull via opencode run ...")
-    subprocess.run(cmd, cwd=str(REPO_ROOT), check=True, timeout=300)
+    print("[phase A] MCP-Pull via opencode run (stdout-JSON ...)")
+    proc = subprocess.run(
+        cmd, cwd=str(REPO_ROOT), check=True, timeout=300,
+        capture_output=True, text=True,
+    )
+    docs = _extract_json_block(proc.stdout)
+    _write_atomic(DATA_DIR / "portfolio.json", docs.get("portfolio") or {})
+    _write_atomic(DATA_DIR / "watchlist.json", docs.get("watchlist") or [])
+    _write_atomic(DATA_DIR / "quotes.json", docs.get("quotes") or [])
+    _write_atomic(DATA_DIR / "news.json", docs.get("news") or [])
 
 
 def _pull_phase_b() -> bool:

@@ -24,6 +24,22 @@ Aufruf-Level: `run_briefing.py` orchestriert `pull→check→fund→news→brief
 Die projektspezifische `opencode.json` liefert den `scalable`-MCP (type remote,
 timeout 30000). `run_briefing.py` führt diesen Pull **nur im Live-Modus** aus.
 
+**stdout-JSON-Handover (Option b):** Der headless Pull-Agent gibt NUR einen
+fenced JSON-Block (```` ```json `````) mit den 4 Rohdokumenten
+(portfolio/watchlist/quotes/news, Rohschema unverändert) via stdout zurück.
+`run_briefing.py` parst die Stdout (`_extract_json_block`) und schreibt die 4
+Dateien deterministisch + atomar (tmp+`os.replace`) nach `data/`. Kein Verlassen
+auf Agent-Schreibrechte/Delegation → der `permissions`-Block für `data/*` in
+`opencode.json` ist entfallen. Timeout/Parse-Fehler → bestehende Fail-Chain
+(letzter Snapshot + Alert, fail-closed).
+
+**Output-Cap-Hinweis:** Das Gesamt-JSON muss in EINER Agent-Antwort passen.
+`quotes.json` ist ein optionales Passthrough-Feld (downstream ungenutzt, nur
+`data.py` lädt es); der Pull-Prompt weist an, die grossen Zeitreihen-
+`dataPoints`-Arrays dort wegzulassen (isin/timeframe/currency/source/
+closingReferencePoint bleiben), damit portfolio/watchlist/news vollständig
+durchkommen.
+
 ### Guardrail (hart) — ausschließlich Read-Tools
 Der Pull-Prompt fordert **nur** diese Read-Calls:
 

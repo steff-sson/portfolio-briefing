@@ -7,9 +7,5 @@
       "enabled": true,
       "timeout": 30000
     }
-  },
-  "permissions": {
-    "write": { "data/*": "allow" },
-    "edit": { "data/*": "allow" }
   }
 }
