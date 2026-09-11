@@ -48,11 +48,28 @@ def test_position_limit_alarm_over_limit():
     assert sigs[0].subject == "US1"
 
 
-def test_position_limit_ignores_core():
-    # Core-Position darf groß sein; ein einziger Satellit bei genau 5% → kein Alarm.
-    holdings = [{"isin": "IE00BK5BQT80", "category": "core", "value_eur": 5000.0}]
-    holdings += [{"isin": f"US{i}", "category": "satellite", "value_eur": 100.0} for i in range(20)]
-    assert checks.check_position_limits(holdings, 5.0) == []
+def test_position_limit_count_core_in_total():
+    # Einzelpositions-Grenze gilt relativ zum GESAMTPORTFOLIO (Stefan A):
+    # eine große Core-Position wird ebenso bewertet wie Satellites.
+    holdings = [
+        {"isin": "IE00BK5BQT80", "category": "core", "value_eur": 5000.0},
+        {"isin": "US1", "category": "satellite", "value_eur": 100.0},
+    ]
+    sigs = checks.check_position_limits(holdings, 5.0)
+    assert len(sigs) == 1
+    assert sigs[0].kind == "position"
+    assert sigs[0].subject == "IE00BK5BQT80"  # Core-Position selbst wird geflaggt
+
+
+def test_position_limit_basis_is_total_not_satellite():
+    # 60% einer großen Satellite-Position in einem kleinen Gesamtportfolio.
+    holdings = [
+        {"isin": "US1", "category": "satellite", "value_eur": 600.0},
+        {"isin": "US2", "category": "satellite", "value_eur": 400.0},
+    ]
+    sigs = checks.check_position_limits(holdings, 50.0)
+    assert len(sigs) == 1
+    assert sigs[0].subject == "US1"
 
 
 def test_sector_concentration_alarm():

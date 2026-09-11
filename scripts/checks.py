@@ -68,15 +68,17 @@ def calculate_ratios(holdings: list[dict[str, Any]]) -> tuple[float, float, floa
 
 
 def check_position_limits(holdings: list[dict[str, Any]], max_position_pct: float) -> list[Signal]:
+    """>5% pro Position, relativ zum GESAMTPORTFOLIO (Stefan-Entscheidung A).
+
+    basis_pct = position_value / total_value * 100 über alle Positionen (auch
+    Core). Die Sektor- (15%) und Positions-Anzahl-Regel bleiben dagegen auf dem
+    Satellite-Sleeve (siehe check_sector_concentration / check_position_count).
+    """
     signals: list[Signal] = []
-    # Guardrail gilt für den Satellite-Sleeve (konsistent zu Sektor/Count).
-    satellites = [h for h in holdings if _isin_category(h) in ("satellite", "legacy")]
-    if not satellites:
-        return signals
-    total = sum(_position_value(h) for h in satellites)
+    total = sum(_position_value(h) for h in holdings)
     if total <= 0:
         return signals
-    for h in satellites:
+    for h in holdings:
         pct = _position_value(h) / total * 100.0
         if pct > max_position_pct:
             signals.append(
@@ -86,7 +88,7 @@ def check_position_limits(holdings: list[dict[str, Any]], max_position_pct: floa
                     subject=str(h.get("isin") or h.get("name")),
                     message=(
                         f"{h.get('name')} ({h.get('isin')}) übersteigt "
-                        f"{max_position_pct:.0f}% Einzelposition: {pct:.1f}%"
+                        f"{max_position_pct:.0f}% Einzelposition: {pct:.1f}% (des Gesamtportfolios)"
                     ),
                 )
             )

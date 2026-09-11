@@ -2,7 +2,7 @@
 
 Config-determinierter Client (Default neuralwatt/deepseek-v4-flash), Key
 NEURALWATT_API_KEY aus ~/.config/automation/config.env via automation-core-
-Konvention. Der Funktionsname wird NIE selbst gelesen/ausgegeben/committet.
+Konvention. Der Key wird NIE selbst gelesen/ausgegeben/committet.
 
 Output: Vorschlagsliste VERKAUFEN/REDUZIEREN/KAUF/HALT, je 1-2 Sätze Begründung
 + Bestätigungsfrage. „Keine Aktion nötig" ist explizit ein gutes Ergebnis.

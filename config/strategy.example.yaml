@@ -47,10 +47,11 @@ portfolio:
 
 # required — Grenzwerte fuer Satellite-Positionen
 satellite_limits:
-  max_position_pct: 5.0           # int|float (%) — max. Einzelposition; gelesen von
-                                  #   calculate_single_position_max
-  max_sector_pct: 15.0            # int|float (%) — max. Sektor-Konzentration; gelesen von
-                                  #   calculate_sector_concentration; muss >= max_position_pct sein
+  # Einzelpositions-Grenze relativ zum GESAMTPORTFOLIO (Stefan-Entscheidung A):
+  # position_value / total_value * 100; gilt auch fuer Core-Positionen.
+  max_position_pct: 5.0           # int|float (%) — max. Einzelposition (Basis: Gesamtportfolio)
+  max_sector_pct: 15.0            # int|float (%) — max. Sektor-Konzentration (Basis:
+                                  #   Satellite-Umfang); gelesen von calculate_sector_concentration
   max_positions: 10               # int — max. Anzahl Satellite-Positionen; muss >= 1 sein
   max_turnover_annual_pct: 30.0   # int|float (%) — max. Jahresumschlag; gelesen von
                                   #   calculate_turnover
